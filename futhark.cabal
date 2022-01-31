@@ -84,6 +84,7 @@ library
       Futhark.CLI.Defs
       Futhark.CLI.Dev
       Futhark.CLI.Doc
+      Futhark.CLI.Fmt
       Futhark.CLI.Literate
       Futhark.CLI.Misc
       Futhark.CLI.Multicore
