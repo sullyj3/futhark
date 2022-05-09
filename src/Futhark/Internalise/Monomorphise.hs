@@ -225,7 +225,7 @@ transformFName loc fname t
     applySizeArg (i, f) size_arg =
       ( i - 1,
         AppExp
-          (Apply f size_arg (Info (Observe, Nothing)) loc)
+          (Apply f size_arg (Info (Observe, Nothing, AutoMap 0)) loc)
           (Info $ AppRes (foldFunType (replicate i i64) (RetType [] (fromStruct t))) [])
       )
 
@@ -328,7 +328,7 @@ transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
   -- sizes for them.
   (pat_sizes, pat') <- sizesForPat pat
   pure $ AppExp (DoLoop (sparams ++ pat_sizes) pat' e1' form' e3' loc) (Info res)
-transformAppExp (BinOp (fname, _) (Info t) (e1, d1) (e2, d2) loc) (AppRes ret ext) = do
+transformAppExp (BinOp (fname, _) (Info (t, automap)) (e1, d1) (e2, d2) loc) (AppRes ret ext) = do
   fname' <- transformFName loc fname $ toStruct t
   e1' <- transformExp e1
   e2' <- transformExp e2
@@ -364,11 +364,11 @@ transformAppExp (BinOp (fname, _) (Info t) (e1, d1) (e2, d2) loc) (AppRes ret ex
       AppExp
         ( Apply
             ( AppExp
-                (Apply fname' x (Info (Observe, snd (unInfo d1))) loc)
+                (Apply fname' x (Info (Observe, snd (unInfo d1), AutoMap 0)) loc) -- Fix?
                 (Info $ AppRes ret mempty)
             )
             y
-            (Info (Observe, snd (unInfo d2)))
+            (Info (Observe, snd (unInfo d2), automap))
             loc
         )
         (Info (AppRes ret ext))
@@ -537,7 +537,7 @@ desugarBinOpSection op e_left e_right t (xp, xtype, xext) (yp, ytype, yext) (Ret
           ( Apply
               op
               e1
-              (Info (Observe, xext))
+              (Info (Observe, xext, AutoMap 0)) -- Fix
               loc
           )
           (Info $ AppRes (Scalar $ Arrow mempty yp (fromStruct ytype) (RetType [] t)) [])
@@ -552,7 +552,7 @@ desugarBinOpSection op e_left e_right t (xp, xtype, xext) (yp, ytype, yext) (Ret
           ( Apply
               apply_left
               e2
-              (Info (Observe, yext))
+              (Info (Observe, yext, AutoMap 0)) -- Fix
               loc
           )
           (Info $ AppRes rettype' retext)

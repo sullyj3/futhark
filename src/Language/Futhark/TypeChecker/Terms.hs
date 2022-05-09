@@ -22,11 +22,12 @@ import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
 import Data.Either
-import Data.List (find, foldl', partition)
+import Data.List (find, foldl', partition, unzip4, zip5)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
 import Data.Maybe
 import qualified Data.Set as S
+import Debug.Trace
 import Futhark.IR.Primitive (intByteSize)
 import Futhark.Util.Pretty hiding (bool, group, space)
 import Language.Futhark
@@ -240,31 +241,100 @@ addResultAliases r (Array als u t shape) = do
   modify $ \s -> s {stateNames = M.insert v r $ stateNames s}
   pure $ Array (S.insert (AliasFree v) als) u t shape
 
+unfoldApply :: UncheckedExp -> TermTypeM (Maybe (QualName VName), PatType, Exp, [Arg])
+unfoldApply (AppExp (Apply e1 e2 _ loc) _) = do
+  (fname, ft, f, args) <- unfoldApply e1
+  arg <- checkArg e2
+  pure (fname, ft, f, args ++ [arg])
+unfoldApply e = do
+  e' <- checkExp e
+  ftype <- expType e'
+  let fname = case e' of
+        Var qn _ _ -> Just qn
+        _ -> Nothing
+  pure (fname, ftype, e', mempty)
+
+checkApplyExp :: UncheckedExp -> TermTypeM Exp
+checkApplyExp e = do
+  (fname, ftype, f, args) <- unfoldApply e
+  let loc = srclocOf e
+  res <- checkApply' loc fname ftype args
+  let (arg_ts, rts, arg_exts, ret_exts, automap) = res
+  foldM
+    ( \fun (arg, arg_t, rt, arg_ext, ret_ext) -> do
+        rt' <- addResultAliases (NameAppRes fname loc) rt
+        pure $
+          AppExp
+            (Apply fun (argExp arg) (Info (diet arg_t, arg_ext, automap)) loc) -- Fix
+            (Info $ AppRes rt' ret_ext)
+    )
+    f
+    (zip5 args arg_ts rts arg_exts ret_exts)
+
+-- unfoldApply :: UncheckedExp -> TermTypeM (Maybe (QualName VName), PatType, [UncheckedExp])
+-- unfoldApply (AppExp (Apply e1 e2 _ loc) _) = do
+--  e1' <- checkExp e1
+--  ftype <- expType e1'
+--  args <- unfoldApply'
+--  let fname = case e1' of
+--        Var qn _ _ -> Just qn
+--        _ -> Nothing
+--  pure $ (fname, ftype, args)
+--  where
+--    unfoldApply' (AppExp (Apply e1 e2 _ loc) _) = do
+--      e1' <- checkExp e1
+--      pure $ e1 : 'unfoldApply e2
+--    unfoldApply' e = pure [e]
+
+-- checkApplyExp :: UncheckedExp -> TermTypeM (Exp, ApplyOp)
+-- checkApplyExp (AppExp (Apply e1 e2 _ loc) _) = do
+--  arg <- checkArg e2
+--  (e1', (fname, i)) <- checkApplyExp e1
+--  t <- expType e1'
+--  (t1, rt, argext, exts) <- checkApply loc (fname, i) t arg
+--  rt' <- addResultAliases (NameAppRes fname loc) rt
+--  pure
+--    ( AppExp
+--        (Apply e1' (argExp arg) (Info (diet t1, argext, AutoMap 0)) loc) -- Fix
+--        (Info $ AppRes rt' exts),
+--      (fname, i + 1)
+--    )
+-- checkApplyExp e = do
+--  e' <- checkExp e
+--  pure
+--    ( e',
+--      ( case e' of
+--          Var qn _ _ -> Just qn
+--          _ -> Nothing,
+--        0
+--      )
+--    )
+
 -- 'checkApplyExp' is like 'checkExp', but tries to find the "root
 -- function", for better error messages.
-checkApplyExp :: UncheckedExp -> TermTypeM (Exp, ApplyOp)
-checkApplyExp (AppExp (Apply e1 e2 _ loc) _) = do
-  arg <- checkArg e2
-  (e1', (fname, i)) <- checkApplyExp e1
-  t <- expType e1'
-  (t1, rt, argext, exts) <- checkApply loc (fname, i) t arg
-  rt' <- addResultAliases (NameAppRes fname loc) rt
-  pure
-    ( AppExp
-        (Apply e1' (argExp arg) (Info (diet t1, argext)) loc)
-        (Info $ AppRes rt' exts),
-      (fname, i + 1)
-    )
-checkApplyExp e = do
-  e' <- checkExp e
-  pure
-    ( e',
-      ( case e' of
-          Var qn _ _ -> Just qn
-          _ -> Nothing,
-        0
-      )
-    )
+-- checkApplyExp :: UncheckedExp -> TermTypeM (Exp, ApplyOp)
+-- checkApplyExp (AppExp (Apply e1 e2 _ loc) _) = do
+--  arg <- checkArg e2
+--  (e1', (fname, i)) <- checkApplyExp e1
+--  t <- expType e1'
+--  (t1, rt, argext, exts) <- checkApply loc (fname, i) t arg
+--  rt' <- addResultAliases (NameAppRes fname loc) rt
+--  pure
+--    ( AppExp
+--        (Apply e1' (argExp arg) (Info (diet t1, argext, AutoMap 0)) loc) -- Fix
+--        (Info $ AppRes rt' exts),
+--      (fname, i + 1)
+--    )
+-- checkApplyExp e = do
+--  e' <- checkExp e
+--  pure
+--    ( e',
+--      ( case e' of
+--          Var qn _ _ -> Just qn
+--          _ -> Nothing,
+--        0
+--      )
+--    )
 
 checkExp :: UncheckedExp -> TermTypeM Exp
 checkExp (Literal val loc) =
@@ -383,14 +453,16 @@ checkExp (AppExp (BinOp (op, oploc) NoInfo (e1, _) (e2, _) loc) NoInfo) = do
 
   -- Note that the application to the first operand cannot fix any
   -- existential sizes, because it must by necessity be a function.
-  (p1_t, rt, p1_ext, _) <- checkApply loc (Just op', 0) ftype e1_arg
-  (p2_t, rt', p2_ext, retext) <- checkApply loc (Just op', 1) rt e2_arg
+  -- (p1_t, rt, p1_ext, _) <- checkApply loc (Just op', 0) ftype e1_arg
+  -- (p2_t, rt', p2_ext, retext) <- checkApply loc (Just op', 1) rt e2_arg
+  res <- checkApply' loc (Just op') ftype [e1_arg, e2_arg]
+  let ([p1_t, p2_t], [_, rt'], [p1_ext, p2_ext], [_, retext], automap) = res
 
   pure $
     AppExp
       ( BinOp
           (op', oploc)
-          (Info ftype)
+          (Info (ftype, automap))
           (argExp e1_arg, Info (toStruct p1_t, p1_ext))
           (argExp e2_arg, Info (toStruct p2_t, p2_ext))
           loc
@@ -473,7 +545,7 @@ checkExp (Negate arg loc) = do
 checkExp (Not arg loc) = do
   arg' <- require "logical negation" (Bool : anyIntType) =<< checkExp arg
   pure $ Not arg' loc
-checkExp e@(AppExp Apply {} _) = fst <$> checkApplyExp e
+checkExp e@(AppExp Apply {} _) = checkApplyExp e
 checkExp (AppExp (LetPat sizes pat e body loc) _) =
   sequentially (checkExp e) $ \e' e_occs -> do
     -- Not technically an ascription, but we want the pattern to have
@@ -906,6 +978,34 @@ dimUses = flip execState mempty . traverseDims f
     f _ PosParam (NamedDim v) = modify ((mempty, S.singleton (qualLeaf v)) <>)
     f _ _ _ = pure ()
 
+funArgTypes :: SrcLoc -> ApplyOp -> PatType -> TermTypeM [PatType]
+funArgTypes loc apop@(fname, _) (Scalar (Arrow as pname tp1 tp2)) = do
+  tp1' <- normTypeFully tp1
+  (tp2', _) <- instantiateDimsInReturnType loc fname =<< normTypeFully tp2
+  (tp1' :) <$> funArgTypes loc apop tp2'
+funArgTypes _ _ _ = return mempty
+
+checkApply' ::
+  SrcLoc ->
+  Maybe (QualName VName) ->
+  PatType ->
+  [Arg] ->
+  TermTypeM ([PatType], [PatType], [Maybe VName], [[VName]], AutoMap)
+checkApply' loc fname ft as = do
+  (arg_ts, rt2, arg_exts, ret_ext) <- checkApply'' loc (fname, 0) ft as
+  ft' <- normTypeFully ft
+  map_depths <- forM (zip (fst $ unfoldFunType ft') arg_ts) $ \(a, a') ->
+    return $ arrayRank a - arrayRank a'
+  return (arg_ts, rt2, arg_exts, ret_ext, AutoMap $ head map_depths)
+  where
+    checkApply'' loc (fname, i) ft [a] = do
+      (arg_t, rt, arg_ext, ret_ext) <- checkApply loc (fname, i) ft a
+      return ([arg_t], [rt], [arg_ext], [ret_ext])
+    checkApply'' loc (fname, i) ft (a : as) = do
+      (arg_t, rt, arg_ext, ret_ext) <- checkApply loc (fname, i) ft a
+      (arg_ts, rts, arg_exts, ret_exts) <- checkApply'' loc (fname, i + 1) rt as
+      return (arg_t : arg_ts, rt : rts, arg_ext : arg_exts, ret_ext : ret_exts)
+
 checkApply ::
   SrcLoc ->
   ApplyOp ->
@@ -1139,16 +1239,16 @@ causalityCheck binding_body = do
       onExp known e@(AppExp (LetPat _ _ bindee_e body_e _) (Info res)) = do
         sequencePoint known bindee_e body_e $ appResExt res
         pure e
-      onExp known e@(AppExp (Apply f arg (Info (_, p)) _) (Info res)) = do
+      onExp known e@(AppExp (Apply f arg (Info (_, p, _)) _) (Info res)) = do
         sequencePoint known arg f $ maybeToList p ++ appResExt res
         pure e
       onExp
         known
-        e@(AppExp (BinOp (f, floc) ft (x, Info (_, xp)) (y, Info (_, yp)) _) (Info res)) = do
+        e@(AppExp (BinOp (f, floc) (Info (ft, _)) (x, Info (_, xp)) (y, Info (_, yp)) _) (Info res)) = do
           args_known <-
             lift $
               execStateT (sequencePoint known x y $ catMaybes [xp, yp]) mempty
-          void $ onExp (args_known <> known) (Var f ft floc)
+          void $ onExp (args_known <> known) (Var f (Info ft) floc)
           modify ((args_known <> S.fromList (appResExt res)) <>)
           pure e
       onExp known e@(AppExp e' (Info res)) = do

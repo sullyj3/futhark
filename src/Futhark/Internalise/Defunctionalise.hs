@@ -731,7 +731,7 @@ etaExpand e_t e = do
         foldl'
           ( \e1 (e2, t2, argtypes) ->
               AppExp
-                (Apply e1 e2 (Info (diet t2, Nothing)) mempty)
+                (Apply e1 e2 (Info (diet t2, Nothing, AutoMap 0)) mempty)
                 (Info (AppRes (foldFunType argtypes ret) []))
           )
           e
@@ -818,7 +818,7 @@ unRetType (RetType ext t) = first onDim t
 -- but a new lifted function is created if a dynamic function is only partially
 -- applied.
 defuncApply :: Int -> Exp -> DefM (Exp, StaticVal)
-defuncApply depth e@(AppExp (Apply e1 e2 d loc) t@(Info (AppRes ret ext))) = do
+defuncApply depth e@(AppExp (Apply e1 e2 d@(Info (_, _, automap)) loc) t@(Info (AppRes ret ext))) = do
   let (argtypes, _) = unfoldFunType ret
   (e1', sv1) <- defuncApply (depth + 1) e1
   (e2', sv2) <- defuncExp e2
@@ -902,7 +902,7 @@ defuncApply depth e@(AppExp (Apply e1 e2 d loc) t@(Info (AppRes ret ext))) = do
             ( AppExp
                 ( Apply
                     ( AppExp
-                        (Apply fname'' e1' (Info (Observe, Nothing)) loc)
+                        (Apply fname'' e1' (Info (Observe, Nothing, automap)) loc) -- Fix
                         ( Info $
                             AppRes
                               ( Scalar $

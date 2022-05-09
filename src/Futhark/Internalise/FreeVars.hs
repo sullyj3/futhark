@@ -101,7 +101,7 @@ freeVars expr = case expr of
       formVars (For v e2) = (freeVars e2, ident v)
       formVars (ForIn p e2) = (freeVars e2, patVars p)
       formVars (While e2) = (freeVars e2, mempty)
-  AppExp (BinOp (qn, _) (Info qn_t) (e1, _) (e2, _) _) _ ->
+  AppExp (BinOp (qn, _) (Info (qn_t, _)) (e1, _) (e2, _) _) _ ->
     NameSet (M.singleton (qualLeaf qn) $ toStruct qn_t)
       <> freeVars e1
       <> freeVars e2

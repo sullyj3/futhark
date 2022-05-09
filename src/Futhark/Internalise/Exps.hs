@@ -14,6 +14,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
+import Debug.Trace
 import Futhark.IR.SOACS as I hiding (stmPat)
 import Futhark.Internalise.AccurateSizes
 import Futhark.Internalise.Bindings
@@ -390,6 +391,7 @@ internaliseAppExp desc _ e@E.Apply {} =
       -- application.
       internaliseExp desc (E.Hole (Info (snd $ E.unfoldFunType t)) loc)
     (FunctionName qfname, args) -> do
+      traceM $ "internaliseAppExp: " <> pretty e
       -- Argument evaluation is outermost-in so that any existential sizes
       -- created by function applications can be brought into scope.
       let fname = nameFromString $ pretty $ baseName $ qualLeaf qfname
@@ -1533,7 +1535,7 @@ data Function
   deriving (Show)
 
 findFuncall :: E.AppExp -> (Function, [(E.Exp, Maybe VName)])
-findFuncall (E.Apply f arg (Info (_, argext)) _)
+findFuncall (E.Apply f arg (Info (_, argext, _)) _)
   | E.AppExp f_e _ <- f =
       let (f_e', args) = findFuncall f_e
        in (f_e', args ++ [(arg, argext)])

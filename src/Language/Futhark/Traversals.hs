@@ -99,9 +99,9 @@ instance ASTMappable (AppExpBase Info VName) where
       <*> pure loc
   astMap tv (Coerce e tdecl loc) =
     Coerce <$> mapOnExp tv e <*> astMap tv tdecl <*> pure loc
-  astMap tv (BinOp (fname, fname_loc) t (x, Info (xt, xext)) (y, Info (yt, yext)) loc) =
+  astMap tv (BinOp (fname, fname_loc) (Info (t, automap)) (x, Info (xt, xext)) (y, Info (yt, yext)) loc) =
     BinOp <$> ((,) <$> mapOnQualName tv fname <*> pure fname_loc)
-      <*> traverse (mapOnPatType tv) t
+      <*> (Info <$> ((,) <$> mapOnPatType tv t <*> pure automap))
       <*> ( (,) <$> mapOnExp tv x
               <*> (Info <$> ((,) <$> mapOnStructType tv xt <*> pure xext))
           )
