@@ -36,11 +36,12 @@ import Control.Monad.Writer hiding (Sum)
 import Data.Bifunctor
 import Data.Bitraversable
 import Data.Foldable
-import Data.List (partition)
+import Data.List (partition, tails, zip4)
 import qualified Data.Map.Strict as M
 import Data.Maybe
 import qualified Data.Sequence as Seq
 import qualified Data.Set as S
+import Debug.Trace
 import Futhark.MonadFreshNames
 import Futhark.Util.Pretty
 import Language.Futhark
@@ -203,29 +204,29 @@ transformFName :: SrcLoc -> QualName VName -> StructType -> MonoM Exp
 transformFName loc fname t
   | baseTag (qualLeaf fname) <= maxIntrinsicTag = pure $ var fname
   | otherwise = do
-      t' <- removeTypeVariablesInType t
-      let mono_t = monoType t'
-      maybe_fname <- lookupLifted (qualLeaf fname) mono_t
-      maybe_funbind <- lookupFun $ qualLeaf fname
-      case (maybe_fname, maybe_funbind) of
-        -- The function has already been monomorphised.
-        (Just (fname', infer), _) ->
-          pure $ applySizeArgs fname' t' $ infer t'
-        -- An intrinsic function.
-        (Nothing, Nothing) -> pure $ var fname
-        -- A polymorphic function.
-        (Nothing, Just funbind) -> do
-          (fname', infer, funbind') <- monomorphiseBinding False funbind mono_t
-          tell $ Seq.singleton (qualLeaf fname, funbind')
-          addLifted (qualLeaf fname) mono_t (fname', infer)
-          pure $ applySizeArgs fname' t' $ infer t'
+    t' <- removeTypeVariablesInType t
+    let mono_t = monoType t'
+    maybe_fname <- lookupLifted (qualLeaf fname) mono_t
+    maybe_funbind <- lookupFun $ qualLeaf fname
+    case (maybe_fname, maybe_funbind) of
+      -- The function has already been monomorphised.
+      (Just (fname', infer), _) ->
+        pure $ applySizeArgs fname' t' $ infer t'
+      -- An intrinsic function.
+      (Nothing, Nothing) -> pure $ var fname
+      -- A polymorphic function.
+      (Nothing, Just funbind) -> do
+        (fname', infer, funbind') <- monomorphiseBinding False funbind mono_t
+        tell $ Seq.singleton (qualLeaf fname, funbind')
+        addLifted (qualLeaf fname) mono_t (fname', infer)
+        pure $ applySizeArgs fname' t' $ infer t'
   where
     var fname' = Var fname' (Info (fromStruct t)) loc
 
     applySizeArg (i, f) size_arg =
       ( i - 1,
         AppExp
-          (Apply f size_arg (Info (Observe, Nothing)) loc)
+          (Apply f size_arg (Info (Observe, Nothing, AutoMap 0)) loc)
           (Info $ AppRes (foldFunType (replicate i i64) (RetType [] (fromStruct t))) [])
       )
 
@@ -252,7 +253,7 @@ transformType t = do
   rrs <- asks envRecordReplacements
   let replace (AliasBound v)
         | Just d <- M.lookup v rrs =
-            S.fromList $ map (AliasBound . fst) $ M.elems d
+          S.fromList $ map (AliasBound . fst) $ M.elems d
       replace x = S.singleton x
   -- As an attempt at an optimisation, only transform the aliases if
   -- they refer to a variable we have record-replaced.
@@ -296,27 +297,163 @@ transformAppExp (LetPat sizes pat e1 e2 loc) res = do
     <*> pure (Info res)
 transformAppExp (LetFun fname (tparams, params, retdecl, Info ret, body) e loc) res
   | not $ null tparams = do
-      -- Retrieve the lifted monomorphic function bindings that are produced,
-      -- filter those that are monomorphic versions of the current let-bound
-      -- function and insert them at this point, and propagate the rest.
-      rr <- asks envRecordReplacements
-      let funbind = PolyBinding rr (fname, tparams, params, ret, body, mempty, loc)
-      pass $ do
-        (e', bs) <- listen $ extendEnv fname funbind $ transformExp e
-        -- Do not remember this one for next time we monomorphise this
-        -- function.
-        modifyLifts $ filter ((/= fname) . fst . fst)
-        let (bs_local, bs_prop) = Seq.partition ((== fname) . fst) bs
-        pure (unfoldLetFuns (map snd $ toList bs_local) e', const bs_prop)
+    -- Retrieve the lifted monomorphic function bindings that are produced,
+    -- filter those that are monomorphic versions of the current let-bound
+    -- function and insert them at this point, and propagate the rest.
+    rr <- asks envRecordReplacements
+    let funbind = PolyBinding rr (fname, tparams, params, ret, body, mempty, loc)
+    pass $ do
+      (e', bs) <- listen $ extendEnv fname funbind $ transformExp e
+      -- Do not remember this one for next time we monomorphise this
+      -- function.
+      modifyLifts $ filter ((/= fname) . fst . fst)
+      let (bs_local, bs_prop) = Seq.partition ((== fname) . fst) bs
+      pure (unfoldLetFuns (map snd $ toList bs_local) e', const bs_prop)
   | otherwise = do
-      body' <- transformExp body
-      AppExp
-        <$> (LetFun fname (tparams, params, retdecl, Info ret, body') <$> transformExp e <*> pure loc)
-        <*> pure (Info res)
+    body' <- transformExp body
+    AppExp
+      <$> (LetFun fname (tparams, params, retdecl, Info ret, body') <$> transformExp e <*> pure loc)
+      <*> pure (Info res)
 transformAppExp (If e1 e2 e3 loc) res =
   AppExp <$> (If <$> transformExp e1 <*> transformExp e2 <*> transformExp e3 <*> pure loc) <*> pure (Info res)
-transformAppExp (Apply e1 e2 d loc) res =
+transformAppExp (Apply e1 e2 d loc) res = do
+  --app <- AppExp <$> (Apply <$> transformExp e1 <*> transformExp e2 <*> pure d <*> pure loc) <*> pure (Info res)
   AppExp <$> (Apply <$> transformExp e1 <*> transformExp e2 <*> pure d <*> pure loc) <*> pure (Info res)
+  where
+    --traceM $ show (unfold_apply app)
+    --(pats, body, tp) <- etaExpand (typeOf $ root app) (root app) (unfold_apply app)
+    --let l = Lambda pats body Nothing (Info (mempty, tp)) mempty
+    --let fun_type =
+    --      case typeOf e1 of
+    --        t@(Scalar (Arrow as p t1 t2)) ->
+    --          Scalar $ Arrow as Unnamed (arrayOf Nonunique (arrayShape $ typeOf e2) t1) (t2 {retType = (arrayOf Nonunique (arrayShape $ typeOf e2) (retType t2))})
+    --        _ -> error ""
+    --let res =
+    --      AppExp
+    --        ( Apply
+    --            ( AppExp
+    --                ( Apply
+    --                    (Var (qualName "map"))
+    --                    l
+    --                    --(Info (mempty, arrayOf Unique (typeof e1) (arrayShape $ typeOf e2), AutoMap 0))
+
+    --                    (Info (mempty, Observe, AutoMap 0))
+    --                    mempty
+    --                )
+    --                (Info $ AppRes fun_type mempty)
+    --            )
+    --            e2
+    --            (Info (mempty, Observe, AutoMap 0))
+    --            mempty
+    --        )
+    --        (Info $ AppRes (arrayOf Unique (arrayShape $ typeOf e2) tp) mempty)
+    --traceM $ pretty res
+    --let args = apply_args app
+    --    f = root_func app
+    --traceM $ "f: " <> pretty f
+    --traceM $ "args: " <> show args
+    --e' <- automap f args
+    --case e' of
+    --  (AppExp (Apply e1 e2 d loc) (Info res)) ->
+    --    AppExp <$> (Apply <$> transformExp e1 <*> transformExp e2 <*> pure d <*> pure loc) <*> pure (Info res)
+    --  _ -> error ""
+
+    --pure app
+
+    root_func (AppExp (Apply e1' e2' (Info (_, _, am)) _) _) = root_func e1'
+    root_func f = f
+
+    apply_args (AppExp (Apply e1' e2' (Info (_, _, am)) _) _) =
+      apply_args e1' ++ [(am, e2')]
+    apply_args f = mempty
+
+    unfold_fun_type_params (RetType _ (Scalar (Arrow _ p t1 t2))) =
+      let (ps, r) = unfold_fun_type_params t2
+       in ((p, t1) : ps, r)
+    unfold_fun_type_params t = (mempty, t)
+
+    toAutoMap (AutoMap x) = x > 0
+
+    eta_expand :: Exp -> [(AutoMap, Exp)] -> MonoM ([Pat], Exp, StructRetType)
+    eta_expand f args = do
+      let (ps, r) = unfold_fun_type_params $ RetType [] $ typeOf f
+      (pats, vars) <- fmap (first catMaybes . unzip) . forM (zip ps args) $ \((p, t), (am@(AutoMap d), argexp)) -> do
+        if toAutoMap am
+          then do
+            traceM $ "t: " <> pretty t
+            traceM $ "am: " <> show am
+            traceM $ "argexp :" <> pretty argexp
+            let t' = fromMaybe (error "") $ peelArray d $ fromStruct $ typeOf argexp
+            x <- case p of
+              Named x -> pure x
+              Unnamed -> newNameFromString "x"
+            pure
+              ( Just $ Id x (Info t') mempty,
+                Var (qualName x) (Info t') mempty
+              )
+          else pure (Nothing, argexp)
+
+      let e' =
+            foldl'
+              ( \e1 (e2, t2, argtypes) ->
+                  AppExp
+                    (Apply e1 e2 (Info (diet t2, Nothing, AutoMap 0)) mempty)
+                    (Info (AppRes (foldFunType argtypes r) []))
+              )
+              f
+              $ zip3 vars (map snd ps) (drop 1 $ tails $ map snd ps)
+
+      pure (pats, e', second (const ()) r)
+
+    insert_map :: Exp -> [(AutoMap, Exp)] -> MonoM Exp
+    insert_map e args = do
+      let f = root_func e
+      (pats, body, rt) <- eta_expand f args
+      let l = Lambda pats body Nothing (Info (mempty, rt)) mempty
+          n = length pats
+          map_args = filter (toAutoMap . fst) args
+          map_args_t = map (typeOf . snd) map_args
+          map_rt =
+            let (AutoMap d, argexp) = head args
+             in arrayOf Unique (arrayShape $ stripArray (d - 1) (typeOf argexp)) $ retType rt
+          map_rts = foldFunType (map (\(AutoMap d, argexp) -> stripArray (d - 1) (typeOf argexp)) map_args) (RetType mempty map_rt)
+          map_f_t = foldFunType map_args_t $ RetType mempty $ retType rt
+          map_t = foldFunType [map_f_t] $ RetType mempty map_rt
+      traceM $ "map_t: " <> pretty map_t
+      traceM $ "map_rt: " <> pretty map_rt
+      traceM $ "map_rts: " <> pretty map_rts
+      fname <- newNameFromString $ "map" ++ if n > 1 then show n else ""
+      pure $ AppExp (Apply (Var (qualName $ fname) (Info $ fromStruct $ map_t) mempty) l (Info (diet $ typeOf l, Nothing, AutoMap 0)) mempty) (Info $ AppRes (fromStruct map_rts) mempty)
+
+    foldApply :: Exp -> [Exp] -> Exp
+    foldApply f args =
+      let (ps, r) = unfold_fun_type_params $ RetType [] $ typeOf f
+       in foldl'
+            ( \e1 (e2, t2, argtypes) ->
+                AppExp
+                  (Apply e1 e2 (Info (diet t2, Nothing, AutoMap 0)) mempty)
+                  (Info (AppRes (foldFunType argtypes r) []))
+            )
+            f
+            $ zip3 args (map snd ps) (drop 1 $ tails $ map snd ps)
+
+    automap :: Exp -> [(AutoMap, Exp)] -> MonoM Exp
+    automap f args
+      | not $ any (toAutoMap . fst) args = do
+        traceM $ "f: " <> pretty f
+        traceM $ "args: " <> show args
+        traceM $ "typeOf f: " <> pretty (typeOf f)
+        let (ps, r) = unfold_fun_type_params $ RetType [] $ typeOf f
+        traceM $ "ps :" <> show ps
+        traceM $ "foldApply: " <> pretty (foldApply f $ map snd args)
+
+        pure $ foldApply f $ map snd args
+      | otherwise = do
+        traceM $ "f: " <> pretty f
+        traceM $ "args: " <> show args
+        f' <- insert_map f args
+        let args' = map (first $ (\(AutoMap x) -> AutoMap (x - 1))) $ filter (toAutoMap . fst) args
+        automap f' args'
 transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
   e1' <- transformExp e1
   form' <- case form of
@@ -329,7 +466,7 @@ transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
   -- sizes for them.
   (pat_sizes, pat') <- sizesForPat pat
   pure $ AppExp (DoLoop (sparams ++ pat_sizes) pat' e1' form' e3' loc) (Info res)
-transformAppExp (BinOp (fname, _) (Info t) (e1, d1) (e2, d2) loc) (AppRes ret ext) = do
+transformAppExp (BinOp (fname, _) (Info t) (e1, Info (_, d1, a1)) (e2, Info (_, d2, a2)) loc) (AppRes ret ext) = do
   fname' <- transformFName loc fname $ toStruct t
   e1' <- transformExp e1
   e2' <- transformExp e2
@@ -365,11 +502,11 @@ transformAppExp (BinOp (fname, _) (Info t) (e1, d1) (e2, d2) loc) (AppRes ret ex
       AppExp
         ( Apply
             ( AppExp
-                (Apply fname' x (Info (Observe, snd (unInfo d1))) loc)
+                (Apply fname' x (Info (Observe, d1, a1)) loc)
                 (Info $ AppRes ret mempty)
             )
             y
-            (Info (Observe, snd (unInfo d2)))
+            (Info (Observe, d2, a2))
             loc
         )
         (Info (AppRes ret ext))
@@ -487,7 +624,7 @@ transformExp (Project n e tp loc) = do
   case maybe_fs of
     Just m
       | Just (v, _) <- M.lookup n m ->
-          pure $ Var (qualName v) tp loc
+        pure $ Var (qualName v) tp loc
     _ -> do
       e' <- transformExp e
       pure $ Project n e' tp loc
@@ -542,7 +679,7 @@ desugarBinOpSection op e_left e_right t (xp, xtype, xext) (yp, ytype, yext) (Ret
           ( Apply
               op
               e1
-              (Info (Observe, xext))
+              (Info (Observe, xext, AutoMap 0)) -- FIXME
               loc
           )
           (Info $ AppRes (Scalar $ Arrow mempty yp ytype (RetType [] t)) [])
@@ -557,7 +694,7 @@ desugarBinOpSection op e_left e_right t (xp, xtype, xext) (yp, ytype, yext) (Ret
           ( Apply
               apply_left
               e2
-              (Info (Observe, yext))
+              (Info (Observe, yext, AutoMap 0)) -- FIXME
               loc
           )
           (Info $ AppRes rettype' retext)
@@ -601,7 +738,7 @@ desugarProjectSection fields (Scalar (Arrow _ _ t1 (RetType dims t2))) loc = do
       case typeOf e of
         Scalar (Record fs)
           | Just t <- M.lookup field fs ->
-              Project field e (Info t) mempty
+            Project field e (Info t) mempty
         t ->
           error $
             "desugarOpSection: type "
@@ -834,7 +971,7 @@ typeSubstsM loc orig_t1 orig_t2 =
     sub t1@Array {} t2@Array {}
       | Just t1' <- peelArray (arrayRank t1) t1,
         Just t2' <- peelArray (arrayRank t1) t2 =
-          sub t1' t2'
+        sub t1' t2'
     sub (Scalar (TypeVar _ _ v _)) t =
       unless (baseTag (qualLeaf v) <= maxIntrinsicTag) $
         addSubst v $
@@ -934,11 +1071,11 @@ transformValBind valbind = do
 
   when (isJust $ valBindEntryPoint valbind) $ do
     t <-
-      removeTypeVariablesInType
-        $ foldFunType
+      removeTypeVariablesInType $
+        foldFunType
           (map patternStructType (valBindParams valbind))
-        $ unInfo
-        $ valBindRetType valbind
+          $ unInfo $
+            valBindRetType valbind
     (name, infer, valbind'') <- monomorphiseBinding True valbind' $ monoType t
     tell $ Seq.singleton (name, valbind'' {valBindEntryPoint = valBindEntryPoint valbind})
     addLifted (valBindName valbind) (monoType t) (name, infer)

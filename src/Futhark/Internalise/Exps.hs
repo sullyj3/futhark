@@ -9,11 +9,14 @@
 module Futhark.Internalise.Exps (transformProg) where
 
 import Control.Monad.Reader
-import Data.List (find, intercalate, intersperse, transpose)
+import Data.Either
+import Data.List (find, intercalate, intersperse, maximumBy, transpose)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
+import Data.Maybe
 import qualified Data.Set as S
+import Debug.Trace
 import Futhark.IR.SOACS as I hiding (stmPat)
 import Futhark.Internalise.AccurateSizes
 import Futhark.Internalise.Bindings
@@ -53,6 +56,11 @@ internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams para
 
     (body', rettype') <- buildBody $ do
       body_res <- internaliseExp (baseString fname <> "_res") body
+      traceM $ "body_res: " <> pretty body_res
+      bt <- do
+        v <- letExp "" $ BasicOp $ SubExp $ head body_res
+        lookupType v
+      traceM $ "bt: " <> pretty bt
       rettype' <-
         fmap zeroExts . internaliseReturnType rettype =<< mapM subExpType body_res
       body_res' <-
@@ -61,6 +69,9 @@ internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams para
         ( body_res',
           replicate (length (shapeContext rettype')) (I.Prim int64) ++ rettype'
         )
+
+    traceM $ "body': " <> pretty body'
+    traceM $ "rettype': " <> pretty rettype'
 
     let all_params = shapeparams ++ concat params'
 
@@ -74,6 +85,8 @@ internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams para
             rettype'
             all_params
             body'
+
+    traceM $ "fd: " <> pretty fd
 
     if null params'
       then bindConstant fname fd
@@ -101,27 +114,51 @@ generateEntryPoint (E.EntryPoint e_params e_rettype) vb = localConstsScope $ do
     let entry' = entryPoint (baseName ofname) (zip e_params params') (e_rettype, entry_rettype)
         args = map (I.Var . I.paramName) $ concat params'
 
-    (entry_body, ctx_ts) <- buildBody $ do
+    (entry_body, (ctx_ts, ret)) <- buildBody $ do
       -- Special case the (rare) situation where the entry point is
       -- not a function.
       maybe_const <- lookupConst ofname
-      vals <- case maybe_const of
+      (vals, ret) <- case maybe_const of
         Just ses ->
-          pure ses
-        Nothing ->
-          fst <$> funcall "entry_result" (E.qualName ofname) args loc
+          pure (ses, entry_rettype)
+        Nothing -> do
+          (ses, ret) <- funcall "entry_result" (E.qualName ofname) args loc
+          traceM $ "ret': " <> pretty ret
+          pure (ses, [ret])
       ctx <-
         extractShapeContext (zeroExts $ concat entry_rettype)
           <$> mapM (fmap I.arrayDims . subExpType) vals
-      pure (subExpsRes $ ctx ++ vals, map (const (I.Prim int64)) ctx)
+      pure (subExpsRes $ ctx ++ vals, (map (const (I.Prim int64)) ctx, ret))
+
+    argts <- forM args $ \se -> do
+      v <- letExp "" $ BasicOp $ SubExp se
+      lookupType v
+    traceM $ "args : " <> show args
+    traceM $ "argts : " <> show argts
+    traceM $ "entry_rettype: " <> pretty entry_rettype
+    traceM $ "ret : " <> pretty ret
+    maybe_const <- lookupConst ofname
+    traceM $ "maybe_const: " <> show maybe_const
 
     attrs' <- internaliseAttrs attrs
+
+    traceM $
+      "fundef: "
+        <> pretty
+          ( I.FunDef
+              (Just entry')
+              attrs'
+              ("entry_" <> baseName ofname)
+              (ctx_ts ++ zeroExts (concat ret))
+              (shapeparams ++ concat params')
+              entry_body
+          )
     addFunDef $
       I.FunDef
         (Just entry')
         attrs'
         ("entry_" <> baseName ofname)
-        (ctx_ts ++ zeroExts (concat entry_rettype))
+        (ctx_ts ++ zeroExts (concat ret))
         (shapeparams ++ concat params')
         entry_body
   where
@@ -160,15 +197,15 @@ entryPoint name params (eret, crets) =
 
     entryPointType t ts
       | E.Scalar (E.Prim E.Unsigned {}) <- E.entryType t =
-          (u, I.TypeUnsigned)
+        (u, I.TypeUnsigned)
       | E.Array _ _ _ (E.Prim E.Unsigned {}) <- E.entryType t =
-          (u, I.TypeUnsigned)
+        (u, I.TypeUnsigned)
       | E.Scalar E.Prim {} <- E.entryType t =
-          (u, I.TypeDirect)
+        (u, I.TypeDirect)
       | E.Array _ _ _ E.Prim {} <- E.entryType t =
-          (u, I.TypeDirect)
+        (u, I.TypeDirect)
       | otherwise =
-          (u, I.TypeOpaque desc $ length ts)
+        (u, I.TypeOpaque desc $ length ts)
       where
         u = foldl max Nonunique $ map I.uniqueness ts
         desc = maybe (prettyOneLine t') typeExpOpaqueName $ E.entryAscribed t
@@ -333,19 +370,19 @@ internaliseAppExp desc _ (E.Range start maybe_second end loc) = do
             I.BinOp (Sub it I.OverflowWrap) end' start'
 
       bounds_invalid <-
-        letSubExp "bounds_invalid"
-          $ I.If
+        letSubExp "bounds_invalid" $
+          I.If
             downwards
             (resultBody [bounds_invalid_downwards])
             (resultBody [bounds_invalid_upwards])
-          $ ifCommon [I.Prim I.Bool]
+            $ ifCommon [I.Prim I.Bool]
       distance_exclusive <-
-        letSubExp "distance_exclusive"
-          $ I.If
+        letSubExp "distance_exclusive" $
+          I.If
             downwards
             (resultBody [distance_downwards_exclusive])
             (resultBody [distance_upwards_exclusive])
-          $ ifCommon [I.Prim $ IntType it]
+            $ ifCommon [I.Prim $ IntType it]
       distance_exclusive_i64 <- asIntS Int64 distance_exclusive
       distance <-
         letSubExp "distance" $
@@ -418,16 +455,16 @@ internaliseAppExp desc _ e@E.Apply {} =
         -- ignore the existential dimensions.
         ()
           | Just internalise <- isOverloadedFunction qfname (map fst args) loc ->
-              internalise desc
+            internalise desc
           | baseTag (qualLeaf qfname) <= maxIntrinsicTag,
             Just (rettype, _) <- M.lookup fname I.builtInFunctions -> do
-              let tag ses = [(se, I.Observe) | se <- ses]
-              args' <- reverse <$> mapM (internaliseArg arg_desc) (reverse args)
-              let args'' = concatMap tag args'
-              letValExp' desc $ I.Apply fname args'' [I.Prim rettype] (Safe, loc, [])
+            let tag ses = [(se, I.Observe) | se <- ses]
+            args' <- reverse <$> mapM (internaliseArg arg_desc) (reverse args)
+            let args'' = concatMap tag args'
+            letValExp' desc $ I.Apply fname args'' [I.Prim rettype] (Safe, loc, [])
           | otherwise -> do
-              args' <- concat . reverse <$> mapM (internaliseArg arg_desc) (reverse args)
-              fst <$> funcall desc qfname args' loc
+            args' <- concat . reverse <$> mapM (internaliseArg arg_desc) (reverse args)
+            fst <$> funcall desc qfname args' loc
 internaliseAppExp desc _ (E.LetPat sizes pat e body _) =
   internalisePat desc sizes pat e body (internaliseExp desc)
 internaliseAppExp _ _ (E.LetFun ofname _ _ _) =
@@ -435,8 +472,10 @@ internaliseAppExp _ _ (E.LetFun ofname _ _ _) =
 internaliseAppExp desc _ (E.DoLoop sparams mergepat mergeexp form loopbody loc) = do
   ses <- internaliseExp "loop_init" mergeexp
   ((loopbody', (form', shapepat, mergepat', mergeinit')), initstms) <-
-    collectStms $ handleForm ses form
-
+    collectStms $
+      handleForm
+        ses
+        form
   addStms initstms
   mergeinit_ts' <- mapM subExpType mergeinit'
 
@@ -544,7 +583,7 @@ internaliseAppExp desc _ (E.DoLoop sparams mergepat mergeexp form loopbody loc) 
                   case se of
                     I.Var v
                       | not $ primType $ paramType p ->
-                          Reshape (map DimCoercion $ arrayDims $ paramType p) v
+                        Reshape (map DimCoercion $ arrayDims $ paramType p) v
                     _ -> SubExp se
           internaliseExp1 "loop_cond" cond
 
@@ -570,7 +609,7 @@ internaliseAppExp desc _ (E.DoLoop sparams mergepat mergeexp form loopbody loc) 
                     case se of
                       I.Var v
                         | not $ primType $ paramType p ->
-                            Reshape (map DimCoercion $ arrayDims $ paramType p) v
+                          Reshape (map DimCoercion $ arrayDims $ paramType p) v
                       _ -> SubExp se
             subExpsRes <$> internaliseExp "loop_cond" cond
           loop_end_cond <- bodyBind loop_end_cond_body
@@ -673,50 +712,50 @@ internaliseExp desc (E.ArrayLit es (Info arr_t) loc)
     not $ null eshape,
     all ((eshape ==) . fst) es',
     Just basetype <- E.peelArray (length eshape) arr_t = do
-      let flat_lit = E.ArrayLit (e' ++ concatMap snd es') (Info basetype) loc
-          new_shape = length es : eshape
-      flat_arrs <- internaliseExpToVars "flat_literal" flat_lit
-      forM flat_arrs $ \flat_arr -> do
-        flat_arr_t <- lookupType flat_arr
-        let new_shape' =
-              reshapeOuter
-                (map (DimNew . intConst Int64 . toInteger) new_shape)
-                1
-                $ I.arrayShape flat_arr_t
-        letSubExp desc $ I.BasicOp $ I.Reshape new_shape' flat_arr
+    let flat_lit = E.ArrayLit (e' ++ concatMap snd es') (Info basetype) loc
+        new_shape = length es : eshape
+    flat_arrs <- internaliseExpToVars "flat_literal" flat_lit
+    forM flat_arrs $ \flat_arr -> do
+      flat_arr_t <- lookupType flat_arr
+      let new_shape' =
+            reshapeOuter
+              (map (DimNew . intConst Int64 . toInteger) new_shape)
+              1
+              $ I.arrayShape flat_arr_t
+      letSubExp desc $ I.BasicOp $ I.Reshape new_shape' flat_arr
   | otherwise = do
-      es' <- mapM (internaliseExp "arr_elem") es
-      arr_t_ext <- internaliseType $ E.toStruct arr_t
+    es' <- mapM (internaliseExp "arr_elem") es
+    arr_t_ext <- internaliseType $ E.toStruct arr_t
 
-      rowtypes <-
-        case mapM (fmap rowType . hasStaticShape . I.fromDecl) arr_t_ext of
-          Just ts -> pure ts
-          Nothing ->
-            -- XXX: the monomorphiser may create single-element array
-            -- literals with an unknown row type.  In those cases we
-            -- need to look at the types of the actual elements.
-            -- Fixing this in the monomorphiser is a lot more tricky
-            -- than just working around it here.
-            case es' of
-              [] -> error $ "internaliseExp ArrayLit: existential type: " ++ pretty arr_t
-              e' : _ -> mapM subExpType e'
+    rowtypes <-
+      case mapM (fmap rowType . hasStaticShape . I.fromDecl) arr_t_ext of
+        Just ts -> pure ts
+        Nothing ->
+          -- XXX: the monomorphiser may create single-element array
+          -- literals with an unknown row type.  In those cases we
+          -- need to look at the types of the actual elements.
+          -- Fixing this in the monomorphiser is a lot more tricky
+          -- than just working around it here.
+          case es' of
+            [] -> error $ "internaliseExp ArrayLit: existential type: " ++ pretty arr_t
+            e' : _ -> mapM subExpType e'
 
-      let arraylit ks rt = do
-            ks' <-
-              mapM
-                ( ensureShape
-                    "shape of element differs from shape of first element"
-                    loc
-                    rt
-                    "elem_reshaped"
-                )
-                ks
-            pure $ I.BasicOp $ I.ArrayLit ks' rt
+    let arraylit ks rt = do
+          ks' <-
+            mapM
+              ( ensureShape
+                  "shape of element differs from shape of first element"
+                  loc
+                  rt
+                  "elem_reshaped"
+              )
+              ks
+          pure $ I.BasicOp $ I.ArrayLit ks' rt
 
-      mapM (letSubExp desc)
-        =<< if null es'
-          then mapM (arraylit []) rowtypes
-          else zipWithM arraylit (transpose es') rowtypes
+    mapM (letSubExp desc)
+      =<< if null es'
+        then mapM (arraylit []) rowtypes
+        else zipWithM arraylit (transpose es') rowtypes
   where
     isArrayLiteral :: E.Exp -> Maybe ([Int], [E.Exp])
     isArrayLiteral (E.ArrayLit inner_es _ _) = do
@@ -774,15 +813,15 @@ internaliseExp desc (E.RecordUpdate src fields ve _ _) = do
   where
     replace (E.Scalar (E.Record m)) (f : fs) ve' src'
       | Just t <- M.lookup f m = do
-          i <-
-            fmap sum $
-              mapM (internalisedTypeSize . snd) $
-                takeWhile ((/= f) . fst) $
-                  sortFields m
-          k <- internalisedTypeSize t
-          let (bef, to_update, aft) = splitAt3 i k src'
-          src'' <- replace t fs ve' to_update
-          pure $ bef ++ src'' ++ aft
+        i <-
+          fmap sum $
+            mapM (internalisedTypeSize . snd) $
+              takeWhile ((/= f) . fst) $
+                sortFields m
+        k <- internalisedTypeSize t
+        let (bef, to_update, aft) = splitAt3 i k src'
+        src'' <- replace t fs ve' to_update
+        pure $ bef ++ src'' ++ aft
     replace _ _ ve' _ = pure ve'
 internaliseExp desc (E.Attr attr e loc) = do
   attr' <- internaliseAttr attr
@@ -802,9 +841,9 @@ internaliseExp desc (E.Attr attr e loc) = do
     f attr' env
       | attr' == "unsafe",
         not $ envSafe env =
-          env {envDoBoundsChecks = False}
+        env {envDoBoundsChecks = False}
       | otherwise =
-          env {envAttrs = envAttrs env <> oneAttr attr'}
+        env {envAttrs = envAttrs env <> oneAttr attr'}
 internaliseExp desc (E.Assert e1 e2 (Info check) loc) = do
   e1' <- internaliseExp1 "assert_cond" e1
   c <- assert "assert_c" e1' (errorMsg [ErrorString $ "Assertion is false: " <> check]) loc
@@ -830,10 +869,10 @@ internaliseExp _ (E.Constr c es (Info (E.Scalar (E.Sum fs))) _) = do
   where
     clauses j (t : ts) js_to_es
       | Just e <- j `lookup` js_to_es =
-          (e :) <$> clauses (j + 1) ts js_to_es
+        (e :) <$> clauses (j + 1) ts js_to_es
       | otherwise = do
-          blank <- letSubExp "zero" =<< eBlank t
-          (blank :) <$> clauses (j + 1) ts js_to_es
+        blank <- letSubExp "zero" =<< eBlank t
+        (blank :) <$> clauses (j + 1) ts js_to_es
     clauses _ [] _ =
       pure []
 internaliseExp _ (E.Constr _ _ (Info t) loc) =
@@ -1051,19 +1090,19 @@ internaliseDimIndex w (E.DimSlice i j s) = do
   backwards <- letSubExp "backwards" $ I.BasicOp $ I.CmpOp (I.CmpEq int64) s_sign negone
   w_minus_1 <- letSubExp "w_minus_1" $ BasicOp $ I.BinOp (Sub Int64 I.OverflowWrap) w one
   let i_def =
-        letSubExp "i_def"
-          $ I.If
+        letSubExp "i_def" $
+          I.If
             backwards
             (resultBody [w_minus_1])
             (resultBody [zero])
-          $ ifCommon [I.Prim int64]
+            $ ifCommon [I.Prim int64]
       j_def =
-        letSubExp "j_def"
-          $ I.If
+        letSubExp "j_def" $
+          I.If
             backwards
             (resultBody [negone])
             (resultBody [w])
-          $ ifCommon [I.Prim int64]
+            $ ifCommon [I.Prim int64]
   i' <- maybe i_def (fmap fst . internaliseSizeExp "i") i
   j' <- maybe j_def (fmap fst . internaliseSizeExp "j") j
   j_m_i <- letSubExp "j_m_i" $ BasicOp $ I.BinOp (Sub Int64 I.OverflowWrap) j' i'
@@ -1119,12 +1158,12 @@ internaliseDimIndex w (E.DimSlice i j s) = do
         [negone_lte_j, negone_lte_j, j_lte_i, zero_leq_i_p_m_t_s, i_p_m_t_s_leq_w]
 
   slice_ok <-
-    letSubExp "slice_ok"
-      $ I.If
+    letSubExp "slice_ok" $
+      I.If
         backwards
         (resultBody [backwards_ok])
         (resultBody [forwards_ok])
-      $ ifCommon [I.Prim I.Bool]
+        $ ifCommon [I.Prim I.Bool]
 
   ok_or_empty <-
     letSubExp "ok_or_empty" $
@@ -1566,14 +1605,14 @@ data Function
   deriving (Show)
 
 findFuncall :: E.AppExp -> (Function, [(E.Exp, Maybe VName)])
-findFuncall (E.Apply f arg (Info (_, argext)) _)
+findFuncall (E.Apply f arg (Info (_, argext, _)) _)
   | E.AppExp f_e _ <- f =
-      let (f_e', args) = findFuncall f_e
-       in (f_e', args ++ [(arg, argext)])
+    let (f_e', args) = findFuncall f_e
+     in (f_e', args ++ [(arg, argext)])
   | E.Var fname _ _ <- f =
-      (FunctionName fname, [(arg, argext)])
+    (FunctionName fname, [(arg, argext)])
   | E.Hole (Info t) loc <- f =
-      (FunctionHole t loc, [(arg, argext)])
+    (FunctionHole t loc, [(arg, argext)])
 findFuncall e =
   error $ "Invalid function expression in application:\n" ++ pretty e
 
@@ -1638,21 +1677,21 @@ isOverloadedFunction qname args loc = do
 
     handleIntrinsicOps [x] s
       | Just unop <- find ((== s) . pretty) allUnOps = Just $ \desc -> do
-          x' <- internaliseExp1 "x" x
-          fmap pure $ letSubExp desc $ I.BasicOp $ I.UnOp unop x'
+        x' <- internaliseExp1 "x" x
+        fmap pure $ letSubExp desc $ I.BasicOp $ I.UnOp unop x'
     handleIntrinsicOps [TupLit [x, y] _] s
       | Just bop <- find ((== s) . pretty) allBinOps = Just $ \desc -> do
-          x' <- internaliseExp1 "x" x
-          y' <- internaliseExp1 "y" y
-          fmap pure $ letSubExp desc $ I.BasicOp $ I.BinOp bop x' y'
+        x' <- internaliseExp1 "x" x
+        y' <- internaliseExp1 "y" y
+        fmap pure $ letSubExp desc $ I.BasicOp $ I.BinOp bop x' y'
       | Just cmp <- find ((== s) . pretty) allCmpOps = Just $ \desc -> do
-          x' <- internaliseExp1 "x" x
-          y' <- internaliseExp1 "y" y
-          fmap pure $ letSubExp desc $ I.BasicOp $ I.CmpOp cmp x' y'
+        x' <- internaliseExp1 "x" x
+        y' <- internaliseExp1 "y" y
+        fmap pure $ letSubExp desc $ I.BasicOp $ I.CmpOp cmp x' y'
     handleIntrinsicOps [x] s
       | Just conv <- find ((== s) . pretty) allConvOps = Just $ \desc -> do
-          x' <- internaliseExp1 "x" x
-          fmap pure $ letSubExp desc $ I.BasicOp $ I.ConvOp conv x'
+        x' <- internaliseExp1 "x" x
+        fmap pure $ letSubExp desc $ I.BasicOp $ I.ConvOp conv x'
     handleIntrinsicOps _ _ = Nothing
 
     -- Short-circuiting operators are magical.
@@ -1670,10 +1709,10 @@ isOverloadedFunction qname args loc = do
     -- arrays.
     handleOps [xe, ye] op
       | Just cmp_f <- isEqlOp op = Just $ \desc -> do
-          xe' <- internaliseExp "x" xe
-          ye' <- internaliseExp "y" ye
-          rs <- zipWithM (doComparison desc) xe' ye'
-          cmp_f desc =<< letSubExp "eq" =<< eAll rs
+        xe' <- internaliseExp "x" xe
+        ye' <- internaliseExp "y" ye
+        rs <- zipWithM (doComparison desc) xe' ye'
+        cmp_f desc =<< letSubExp "eq" =<< eAll rs
       where
         isEqlOp "!=" = Just $ \desc eq ->
           letTupExp' desc $ I.BasicOp $ I.UnOp I.Not eq
@@ -1720,13 +1759,13 @@ isOverloadedFunction qname args loc = do
                   ifCommon [I.Prim I.Bool]
     handleOps [x, y] name
       | Just bop <- find ((name ==) . pretty) [minBound .. maxBound :: E.BinOp] =
-          Just $ \desc -> do
-            x' <- internaliseExp1 "x" x
-            y' <- internaliseExp1 "y" y
-            case (E.typeOf x, E.typeOf y) of
-              (E.Scalar (E.Prim t1), E.Scalar (E.Prim t2)) ->
-                internaliseBinOp loc desc bop x' y' t1 t2
-              _ -> error "Futhark.Internalise.internaliseExp: non-primitive type in BinOp."
+        Just $ \desc -> do
+          x' <- internaliseExp1 "x" x
+          y' <- internaliseExp1 "y" y
+          case (E.typeOf x, E.typeOf y) of
+            (E.Scalar (E.Prim t1), E.Scalar (E.Prim t2)) ->
+              internaliseBinOp loc desc bop x' y' t1 t2
+            _ -> error "Futhark.Internalise.internaliseExp: non-primitive type in BinOp."
     handleOps _ _ = Nothing
 
     handleSOACs [TupLit [lam, arr] _] "map" = Just $ \desc -> do
@@ -1791,13 +1830,13 @@ isOverloadedFunction qname args loc = do
 
     handleAD [TupLit [f, x, v] _] fname
       | fname `elem` ["jvp2", "vjp2"] = Just $ \desc -> do
-          x' <- internaliseExp "ad_x" x
-          v' <- internaliseExp "ad_v" v
-          lam <- internaliseLambdaCoerce f =<< mapM subExpType x'
-          fmap (map I.Var) . letTupExp desc . Op $
-            case fname of
-              "jvp2" -> JVP lam x' v'
-              _ -> VJP lam x' v'
+        x' <- internaliseExp "ad_x" x
+        v' <- internaliseExp "ad_v" v
+        lam <- internaliseLambdaCoerce f =<< mapM subExpType x'
+        fmap (map I.Var) . letTupExp desc . Op $
+          case fname of
+            "jvp2" -> JVP lam x' v'
+            _ -> VJP lam x' v'
     handleAD _ _ = Nothing
 
     handleRest [E.TupLit [a, si, v] _] "scatter" = Just $ scatterF 1 a si v
@@ -1898,12 +1937,12 @@ isOverloadedFunction qname args loc = do
       e' <- internaliseExp1 "trunc_arg" e
       case E.typeOf e of
         E.Scalar (E.Prim E.Bool) ->
-          letTupExp' desc
-            $ I.If
+          letTupExp' desc $
+            I.If
               e'
               (resultBody [intConst int_to 1])
               (resultBody [intConst int_to 0])
-            $ ifCommon [I.Prim $ I.IntType int_to]
+              $ ifCommon [I.Prim $ I.IntType int_to]
         E.Scalar (E.Prim (E.Signed int_from)) ->
           letTupExp' desc $ I.BasicOp $ I.ConvOp (I.SExt int_from int_to) e'
         E.Scalar (E.Prim (E.Unsigned int_from)) ->
@@ -1916,12 +1955,12 @@ isOverloadedFunction qname args loc = do
       e' <- internaliseExp1 "trunc_arg" e
       case E.typeOf e of
         E.Scalar (E.Prim E.Bool) ->
-          letTupExp' desc
-            $ I.If
+          letTupExp' desc $
+            I.If
               e'
               (resultBody [intConst int_to 1])
               (resultBody [intConst int_to 0])
-            $ ifCommon [I.Prim $ I.IntType int_to]
+              $ ifCommon [I.Prim $ I.IntType int_to]
         E.Scalar (E.Prim (E.Signed int_from)) ->
           letTupExp' desc $ I.BasicOp $ I.ConvOp (I.ZExt int_from int_to) e'
         E.Scalar (E.Prim (E.Unsigned int_from)) ->
@@ -2086,13 +2125,210 @@ flatUpdateHelper desc loc arr1 offset slices arr2 = do
     forM (zip arrs1 arrs2) $ \(arr1', arr2') ->
       letSubExp desc $ I.BasicOp $ I.FlatUpdate arr1' slice arr2'
 
-funcall ::
-  String ->
-  QualName VName ->
-  [SubExp] ->
-  SrcLoc ->
-  InternaliseM ([SubExp], [I.ExtType])
-funcall desc (QualName _ fname) args loc = do
+--funcall ::
+--  String ->
+--  QualName VName ->
+--  [SubExp] ->
+--  SrcLoc ->
+--  InternaliseM ([SubExp], [I.ExtType])
+funcall desc qfname@(QualName _ fname) args loc = do
+  (shapes, value_paramts, fun_params, rettype_fun) <-
+    lookupFunction fname
+  argts <- mapM subExpType args
+
+  traceM $ "shapes : " <> pretty shapes
+  traceM $ "fun_params: " <> pretty fun_params
+  traceM $ "argts: " <> pretty argts
+
+  shapeargs <- argShapes shapes fun_params argts
+
+  args' <-
+    ensureArgShapes
+      "function arguments of wrong shape"
+      loc
+      (map I.paramName fun_params)
+      (map I.paramType fun_params)
+      (shapeargs ++ args)
+
+  argts' <- mapM subExpType args'
+  --(argts_shape', argts') <- splitAt (length shapeargs) <$> mapM subExpType args'
+
+  traceM $ "fun_param: " <> pretty fun_params
+  traceM $ "argt': " <> pretty argts'
+  let ds = max_depths argts' fun_params
+  --ses <- expand args argts ds $ maximum ds
+
+  let argts'' =
+        zipWith
+          ( \t d ->
+              if d > 0
+                then I.stripArray d t
+                else t
+          )
+          argts'
+          ds
+
+  args'' <-
+    zipWithM
+      ( \se d ->
+          if d > 0
+            then do
+              x <- letExp "" $ BasicOp $ SubExp se
+              letSubExp "" $ BasicOp $ I.Index x $ Slice $ replicate 1 $ I.DimFix $ Constant $ IntValue $ intValue Int64 0
+            else pure se
+      )
+      args'
+      ds
+
+  traceM $ "args': " <> pretty args'
+  traceM $ "args'': " <> pretty args''
+  --traceM $ "argts_shape': " <> pretty argts_shape'
+  traceM $ "argts'': " <> pretty argts''
+
+  traceM $ "argts': " <> pretty argts'
+  traceM $ "maximum ds: " <> pretty (maximum ds)
+  case rettype_fun $ zip args'' argts'' of
+    --case rettype_fun $ zip args' $ argts_shape' ++ argts'' of
+    Nothing ->
+      error $
+        concat
+          [ "Cannot apply ",
+            pretty fname,
+            " to ",
+            show (length args'),
+            " arguments\n ",
+            pretty args'',
+            "\nof types\n ",
+            pretty argts'',
+            --pretty (argts_shape' ++ argts''),
+            "\nFunction has ",
+            show (length fun_params),
+            " parameters\n ",
+            pretty fun_params
+          ]
+    Just ts -> do
+      ses <- expand args argts ds (maximum ds) ts
+      traceM $ "fix_rettype: " <> pretty (fix_rettype ts ds (maximum ds) argts')
+      pure (ses, fix_rettype ts ds (maximum ds) argts')
+  where
+    --safety <- askSafety
+    --attrs <- asks envAttrs
+    --ses <-
+    --  attributing attrs . letValExp' desc $
+    --    I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
+    --pure (ses, map I.fromDecl ts)
+
+    --shapeargs <- argShapes shapes fun_params argts
+    --let diets =
+    --      replicate (length shapeargs) I.ObservePrim
+    --        ++ map I.diet value_paramts
+    --args' <-
+    --  ensureArgShapes
+    --    "function arguments of wrong shape"
+    --    loc
+    --    (map I.paramName fun_params)
+    --    (map I.paramType fun_params)
+    --    (shapeargs ++ args)
+    --argts' <- mapM subExpType args'
+    --traceM $ "args: " <> pretty args
+    --traceM $ "shapeargs: " <> pretty shapeargs
+    --traceM $ "args': " <> pretty args'
+    --traceM $ "argsts' : " <> pretty argts'
+    --traceM $ "max_depth: " <> pretty (max_depths argts fun_params)
+
+    --traceM $ "automap_rettype: " <> pretty (automap_rettype_fun rettype_fun (max_depths argts fun_params) 1 (zip args' argts'))
+
+    --let ds = max_depths argts fun_params
+    --traceM $ "maximum ds: " <> pretty (maximum ds)
+    --(res, stms) <- collectStms $ expand args' argts' ds $ maximum ds
+    --traceM $ "stms: " <> pretty stms
+    --traceM $ "res: " <> pretty res
+
+    --case rettype_fun $ zip args' argts' of
+    --  Nothing ->
+    --    error $
+    --      concat
+    --        [ "Cannot apply ",
+    --          pretty fname,
+    --          " to ",
+    --          show (length args'),
+    --          " arguments\n ",
+    --          pretty args',
+    --          "\nof types\n ",
+    --          pretty argts',
+    --          "\nFunction has ",
+    --          show (length fun_params),
+    --          " parameters\n ",
+    --          pretty fun_params
+    --        ]
+    --  Just ts -> do
+    --    safety <- askSafety
+    --    attrs <- asks envAttrs
+    --    ses <-
+    --      attributing attrs . letValExp' desc $
+    --        I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
+    --    pure (ses, map I.fromDecl ts)
+
+    rank_diff t1 t2 = I.arrayRank t1 - I.arrayRank t2
+
+    max_depths argts fun_params =
+      zipWith rank_diff argts (map I.paramType fun_params)
+
+    --to_automap = any (> 0)
+
+    dimensions_to_add ds argts depth =
+      let (d_max, t_max) = maximumBy (\x y -> fst x `compare` fst y) (zip ds argts)
+       in --in (\(I.Shape ds) -> I.Shape $ map Free $ take depth ds) $ I.arrayShape t_max
+          (\(I.Shape ds) -> I.Shape $ take depth ds) $ I.arrayShape t_max
+
+    fix_rettype ts ds level argts =
+      let (d_max, t_max) = maximumBy (\x y -> fst x `compare` fst y) (zip ds argts)
+          added_dims = (\(I.Shape ds) -> I.Shape $ map Free $ take level ds) $ I.arrayShape t_max
+       in map (\rettype -> I.arrayOf rettype added_dims Unique) ts
+    expand args argts ds level ts
+      | level == 0 = fst <$> funcall' desc qfname args loc ts
+      | otherwise = do
+        param_args <- forM (zip3 args argts ds) $ \(se, t, d) -> do
+          if d == level
+            then -- then fmap (Left . (se,)) $ newParam "x" $ I.arrayOfShape t $ I.Shape [Constant $ IntValue $ intValue Int64 $ d - 1] -- this is wrong
+              fmap (Left . (se,)) $ newParam "x" $ I.stripArray 1 t --I.arrayOfShape t $ I.Shape [Constant $ IntValue $ intValue Int64 $ d - 1] -- this is wrong
+            else pure $ Right se
+        let (map_args, params) = unzip $ lefts param_args
+            args' =
+              map
+                ( \xs -> case xs of
+                    Left (_, p) -> I.Var $ paramName p
+                    Right se -> se
+                )
+                param_args
+            argts' =
+              zipWith
+                ( \xs t -> case xs of
+                    Left _ -> I.stripArray 1 t
+                    _ -> t
+                )
+                param_args
+                argts
+            ds' = map (\d -> if d == level then d - 1 else d) ds
+        lam <-
+          mkLambda params $
+            subExpsRes <$> expand args' argts' ds' (level - 1) ts
+
+        map_args_names <- forM map_args $ \se -> letExp "map_arg" $ BasicOp $ SubExp se
+        t <- lookupType $ head map_args_names
+
+        --traceM $ "foo: " <> (pretty (Screma (arraySize 0 t) map_args_names $ mapSOAC lam))
+
+        letValExp' "automap" $ Op $ Screma (arraySize 0 t) map_args_names $ mapSOAC lam
+
+--funcall' ::
+--  String ->
+--  QualName VName ->
+--  [SubExp] ->
+--  SrcLoc ->
+--  [DeclExtType] ->
+--  InternaliseM ([SubExp], [I.ExtType])
+funcall' desc qfname@(QualName _ fname) args loc ts = do
   (shapes, value_paramts, fun_params, rettype_fun) <-
     lookupFunction fname
   argts <- mapM subExpType args
@@ -2109,30 +2345,185 @@ funcall desc (QualName _ fname) args loc = do
       (map I.paramType fun_params)
       (shapeargs ++ args)
   argts' <- mapM subExpType args'
-  case rettype_fun $ zip args' argts' of
-    Nothing ->
-      error $
-        concat
-          [ "Cannot apply ",
-            pretty fname,
-            " to ",
-            show (length args'),
-            " arguments\n ",
-            pretty args',
-            "\nof types\n ",
-            pretty argts',
-            "\nFunction has ",
-            show (length fun_params),
-            " parameters\n ",
-            pretty fun_params
-          ]
-    Just ts -> do
-      safety <- askSafety
-      attrs <- asks envAttrs
-      ses <-
-        attributing attrs . letValExp' desc $
-          I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
-      pure (ses, map I.fromDecl ts)
+  --traceM $ "max_depth: " <> pretty (max_depths argts fun_params)
+
+  --traceM $ "automap_rettype: " <> pretty (automap_rettype_fun rettype_fun (max_depths argts fun_params) 1 (zip args' argts'))
+
+  --let ds = max_depths argts fun_params
+  --(res, stms) <- collectStms $ expand args' argts' ds $ maximum ds
+  --traceM $ "stms: " <> pretty stms
+  --traceM $ "res: " <> pretty res
+
+  --case rettype_fun $ zip args' argts' of
+  --  Nothing ->
+  --    error $
+  --      concat
+  --        [ "Cannot apply ",
+  --          pretty fname,
+  --          " to ",
+  --          show (length args'),
+  --          " arguments\n ",
+  --          pretty args',
+  --          "\nof types\n ",
+  --          pretty argts',
+  --          "\nFunction has ",
+  --          show (length fun_params),
+  --          " parameters\n ",
+  --          pretty fun_params
+  --        ]
+  --  Just ts -> do
+  safety <- askSafety
+  attrs <- asks envAttrs
+  ses <-
+    attributing attrs . letValExp' desc $
+      I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
+  pure (ses, ts)
+
+--funcall ::
+--  String ->
+--  QualName VName ->
+--  [SubExp] ->
+--  SrcLoc ->
+--  InternaliseM ([SubExp], [I.ExtType])
+--funcall desc qfname@(QualName _ fname) args loc = do
+--  (shapes, value_paramts, fun_params, rettype_fun) <-
+--    lookupFunction fname
+--  argts <- mapM subExpType args
+--
+--  shapeargs <- argShapes shapes fun_params argts
+--  let diets =
+--        replicate (length shapeargs) I.ObservePrim
+--          ++ map I.diet value_paramts
+--  args' <-
+--    ensureArgShapes
+--      "function arguments of wrong shape"
+--      loc
+--      (map I.paramName fun_params)
+--      (map I.paramType fun_params)
+--      (shapeargs ++ args)
+--  argts' <- mapM subExpType args'
+--  traceM $ "args: " <> pretty args
+--  traceM $ "shapeargs: " <> pretty shapeargs
+--  traceM $ "args': " <> pretty args'
+--  traceM $ "argsts' : " <> pretty argts'
+--  traceM $ "max_depth: " <> pretty (max_depths argts fun_params)
+--
+--  traceM $ "automap_rettype: " <> pretty (automap_rettype_fun rettype_fun (max_depths argts fun_params) 1 (zip args' argts'))
+--
+--  let ds = max_depths argts fun_params
+--  --(res, stms) <- collectStms $ expand args' argts' ds $ maximum ds
+--  --traceM $ "stms: " <> pretty stms
+--  --traceM $ "res: " <> pretty res
+--
+--  case rettype_fun $ zip args' argts' of
+--    Nothing ->
+--      error $
+--        concat
+--          [ "Cannot apply ",
+--            pretty fname,
+--            " to ",
+--            show (length args'),
+--            " arguments\n ",
+--            pretty args',
+--            "\nof types\n ",
+--            pretty argts',
+--            "\nFunction has ",
+--            show (length fun_params),
+--            " parameters\n ",
+--            pretty fun_params
+--          ]
+--    Just ts -> do
+--      safety <- askSafety
+--      attrs <- asks envAttrs
+--      ses <-
+--        attributing attrs . letValExp' desc $
+--          I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
+--      pure (ses, map I.fromDecl ts)
+--  where
+--    rank_diff t1 t2 = I.arrayRank t1 - I.arrayRank t2
+--
+--    max_depths argts fun_params =
+--      zipWith rank_diff argts (map I.paramType fun_params)
+--
+--    --to_automap = any (> 0)
+--
+--    dimensions_to_add ds argts depth =
+--      let (d_max, t_max) = maximumBy (\x y -> fst x `compare` fst y) (zip ds argts)
+--       in --in (\(I.Shape ds) -> I.Shape $ map Free $ take depth ds) $ I.arrayShape t_max
+--          (\(I.Shape ds) -> I.Shape $ take depth ds) $ I.arrayShape t_max
+--
+--    automap_rettype_fun :: ([(SubExp, Type)] -> Maybe [DeclExtType]) -> [Int] -> Int -> [(SubExp, Type)] -> Maybe [DeclExtType]
+--    automap_rettype_fun f ds depth argts = do
+--      rettypes <- f $ zipWith (\d (se, t) -> (se, fromMaybe (error "") $ I.peelArray d t)) ds argts
+--      let (d_max, (_, t_max)) = maximumBy (\x y -> fst x `compare` fst y) (zip ds argts)
+--          --added_dims = (\(I.Shape ds) -> I.Shape $ map Free $ take (d_max - (depth - 1)) ds) $ I.arrayShape t_max
+--          added_dims = (\(I.Shape ds) -> I.Shape $ map Free $ take depth ds) $ I.arrayShape t_max
+--      pure $ map (\rettype -> I.arrayOf rettype added_dims Nonunique) rettypes -- TODO: fix
+--    expand args argts ds level
+--      | level == 0 = fst <$> funcall desc qfname args loc
+--      | otherwise = do
+--        param_args <- forM (zip3 args argts ds) $ \(se, t, d) -> do
+--          if d == level
+--            then fmap (Left . (se,)) $ newParam "x" $ I.arrayOfShape t $ I.Shape [Constant $ IntValue $ intValue Int64 $ d - 1]
+--            else pure $ Right se
+--        let (map_args, params) = unzip $ lefts param_args
+--            args' =
+--              map
+--                ( \xs -> case xs of
+--                    Left (_, p) -> I.Var $ paramName p
+--                    Right se -> se
+--                )
+--                param_args
+--            argts' =
+--              zipWith
+--                ( \xs t -> case xs of
+--                    Left _ -> I.stripArray 1 t
+--                    _ -> t
+--                )
+--                param_args
+--                argts
+--            ds' = map (\d -> if d == level then d - 1 else d) ds
+--        lam <-
+--          mkLambda params $
+--            subExpsRes <$> expand args' argts' ds' (level - 1)
+--
+--        map_args_names <- forM map_args $ \se -> letExp "map_arg" $ BasicOp $ SubExp se
+--        t <- lookupType $ head map_args_names
+--
+--        letValExp' "automap" $ Op $ Screma (arraySize 0 t) map_args_names $ mapSOAC lam
+
+--expand :: [Type] -> [Int] -> [DeclExtType] -> [I.Diet] -> [SubExp] -> Int -> InternaliseM [SubExp]
+--expand argts ds rts diets args' depth
+--  | not $ to_automap ds = do
+--    safety <- askSafety
+--    attrs <- asks envAttrs
+--    attributing attrs . letValExp' desc $
+--      I.Apply (internaliseFunName fname) (zip args' diets) rts (safety, loc, mempty)
+--  | otherwise = do
+--    param_args <- fmap catMaybes $
+--      forM (zip3 args argts ds) $ \(se, t, d) -> do
+--        if d > 0
+--          then (Just . Left) <$> (newParam "x" $ I.arrayOfShape t (take_shape d new_dims))
+--          else
+--            if d == 0
+--              then (Just . Right) <$> (letExp "x" $ BasicOp $ SubExp se)
+--              else pure Nothing
+--    let params = lefts param_args
+--        g (Left p) = paramName p
+--        g (Right v) = v
+--        args'' = map g param_args
+
+--    lam <- mkLambda params $
+--      --ses <- expand argts (map (\x -> max 0 (x - 1) ds) ds) rts diets args' (depth - 1)
+--      subExpRes <$> expand argts (map (-1) ds) rts diets args' (depth - 1)
+
+--    Screma $ mapSOAC lam
+--  where
+--    new_dims = dimensions_to_add ds argts depth
+--    take_shape n (I.Shape ds) = I.Shape (drop (length ds - n) ds)
+
+--expand :: [Type] -> InternaliseM
+--expand argts =
 
 -- Bind existential names defined by an expression, based on the
 -- concrete values that expression evaluated to.  This most
@@ -2275,12 +2666,12 @@ partitionWithSOACS k lam arrs = do
             (Add Int64 OverflowUndef)
             (constant (-1 :: Int64))
             (I.Var (I.paramName p) : take i sizes)
-      letSubExp "total_res"
-        $ I.If
+      letSubExp "total_res" $
+        I.If
           is_this_one
           (resultBody [this_one])
           (resultBody [next_one])
-        $ ifCommon [I.Prim int64]
+          $ ifCommon [I.Prim int64]
 
 typeExpForError :: E.TypeExp VName -> InternaliseM [ErrorMsgPart SubExp]
 typeExpForError (E.TEVar qn _) =

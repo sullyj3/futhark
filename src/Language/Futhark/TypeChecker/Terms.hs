@@ -27,6 +27,7 @@ import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
 import Data.Maybe
 import qualified Data.Set as S
+import Debug.Trace
 import Futhark.Util.Pretty hiding (bool, group, space)
 import Language.Futhark
 import Language.Futhark.Primitive (intByteSize)
@@ -110,11 +111,11 @@ sliceShape r slice t@(Array als u (Shape orig_dims) et) =
         maybe True ((== Just 0) . isInt64) i,
         Just j' <- maybeDimFromExp =<< j,
         maybe True ((== Just 1) . isInt64) stride =
-          (j' :) <$> adjustDims idxes' dims
+        (j' :) <$> adjustDims idxes' dims
     adjustDims (DimSlice Nothing Nothing stride : idxes') (d : dims)
       | refine_sizes,
         maybe True (maybe False ((== 1) . abs) . isInt64) stride =
-          (d :) <$> adjustDims idxes' dims
+        (d :) <$> adjustDims idxes' dims
     adjustDims (DimSlice i j stride : idxes') (d : dims) =
       (:) <$> sliceSize d i j stride <*> adjustDims idxes' dims
     adjustDims _ dims =
@@ -190,7 +191,7 @@ unscopeType tloc unscoped t = do
     onDim bound _ (NamedSize d)
       | Just loc <- srclocOf <$> M.lookup (qualLeaf d) unscoped,
         not $ qualLeaf d `S.member` bound =
-          inst loc $ qualLeaf d
+        inst loc $ qualLeaf d
     onDim _ _ d = pure d
 
     inst loc d = do
@@ -212,10 +213,10 @@ checkApplyExp (AppExp (Apply e1 e2 _ loc) _) = do
   arg <- checkArg e2
   (e1', (fname, i)) <- checkApplyExp e1
   t <- expType e1'
-  (t1, rt, argext, exts) <- checkApply loc (fname, i) t arg
+  (t1, rt, argext, exts, automap) <- checkApply loc (fname, i) t arg
   pure
     ( AppExp
-        (Apply e1' (argExp arg) (Info (diet t1, argext)) loc)
+        (Apply e1' (argExp arg) (Info (diet t1, argext, automap)) loc)
         (Info $ AppRes rt exts),
       (fname, i + 1)
     )
@@ -318,13 +319,13 @@ checkExp (AppExp (Range start maybe_step end loc) _) = do
     case (isInt64 start', isInt64 <$> maybe_step', end') of
       (Just 0, Just (Just 1), UpToExclusive end'')
         | Scalar (Prim (Signed Int64)) <- end_t ->
-            dimFromBound end''
+          dimFromBound end''
       (Just 0, Nothing, UpToExclusive end'')
         | Scalar (Prim (Signed Int64)) <- end_t ->
-            dimFromBound end''
+          dimFromBound end''
       (Just 1, Just (Just 2), ToInclusive end'')
         | Scalar (Prim (Signed Int64)) <- end_t ->
-            dimFromBound end''
+          dimFromBound end''
       _ -> do
         d <- newDimVar loc (Rigid RigidRange) "range_dim"
         pure (NamedSize $ qualName d, Just d)
@@ -348,16 +349,16 @@ checkExp (AppExp (BinOp (op, oploc) NoInfo (e1, _) (e2, _) loc) NoInfo) = do
 
   -- Note that the application to the first operand cannot fix any
   -- existential sizes, because it must by necessity be a function.
-  (p1_t, rt, p1_ext, _) <- checkApply loc (Just op', 0) ftype e1_arg
-  (p2_t, rt', p2_ext, retext) <- checkApply loc (Just op', 1) rt e2_arg
+  (p1_t, rt, p1_ext, _, automap1) <- checkApply loc (Just op', 0) ftype e1_arg
+  (p2_t, rt', p2_ext, retext, automap2) <- checkApply loc (Just op', 1) rt e2_arg
 
   pure $
     AppExp
       ( BinOp
           (op', oploc)
           (Info ftype)
-          (argExp e1_arg, Info (toStruct p1_t, p1_ext))
-          (argExp e2_arg, Info (toStruct p2_t, p2_ext))
+          (argExp e1_arg, Info (toStruct p1_t, p1_ext, automap1))
+          (argExp e2_arg, Info (toStruct p2_t, p2_ext, automap2))
           loc
       )
       (Info (AppRes rt' retext))
@@ -422,10 +423,10 @@ checkExp (Var qn NoInfo loc) = do
     notFound qs name err
       | null qs = throwError err
       | otherwise = do
-          (qn', t, fields) <-
-            findRootVar (init qs) (last qs)
-              `catchError` const (throwError err)
-          pure (qn', t, fields ++ [name])
+        (qn', t, fields) <-
+          findRootVar (init qs) (last qs)
+            `catchError` const (throwError err)
+        pure (qn', t, fields ++ [name])
 
     checkField e k = do
       t <- expType e
@@ -558,8 +559,8 @@ checkExp (RecordUpdate src fields ve NoInfo loc) = do
       pure ve_t
     updateField (f : fs) ve_t (Scalar (Record m))
       | Just f_t <- M.lookup f m = do
-          f_t' <- updateField fs ve_t f_t
-          pure $ Scalar $ Record $ M.insert f f_t' m
+        f_t' <- updateField fs ve_t f_t
+        pure $ Scalar $ Record $ M.insert f f_t' m
     updateField _ _ _ =
       typeError loc mempty . withIndexLink "record-type-not-known" $
         "Full type of"
@@ -650,7 +651,7 @@ checkExp (OpSection op _ loc) = do
 checkExp (OpSectionLeft op _ e _ _ loc) = do
   (op', ftype) <- lookupVar loc op
   e_arg <- checkArg e
-  (t1, rt, argext, retext) <- checkApply loc (Just op', 0) ftype e_arg
+  (t1, rt, argext, retext, _automap) <- checkApply loc (Just op', 0) ftype e_arg
   case (ftype, rt) of
     (Scalar (Arrow _ m1 _ _), Scalar (Arrow _ m2 t2 rettype)) ->
       pure $
@@ -669,7 +670,7 @@ checkExp (OpSectionRight op _ e _ NoInfo loc) = do
   e_arg <- checkArg e
   case ftype of
     Scalar (Arrow as1 m1 t1 (RetType [] (Scalar (Arrow as2 m2 t2 (RetType dims2 ret))))) -> do
-      (t2', ret', argext, _) <-
+      (t2', ret', argext, _, _automap) <-
         checkApply
           loc
           (Just op', 1)
@@ -877,19 +878,37 @@ checkApply ::
   ApplyOp ->
   PatType ->
   Arg ->
-  TermTypeM (StructType, PatType, Maybe VName, [VName])
+  TermTypeM (StructType, PatType, Maybe VName, [VName], AutoMap)
 checkApply
   loc
   (fname, _)
   (Scalar (Arrow as pname tp1 tp2))
   (argexp, argtype, dflow, argloc) =
     onFailure (CheckingApply fname argexp tp1 (toStruct argtype)) $ do
-      expect (mkUsage argloc "use as function argument") (toStruct tp1) (toStruct argtype)
+      let rankDiff = arrayRank argtype - arrayRank tp1
+      let automap = max rankDiff 0
+      let isTypeVar (Scalar TypeVar {}) = True
+          isTypeVar _ = False
+
+      traceM $ "rankDiff: " <> show rankDiff
+      traceM $ "automap: " <> show automap
+      traceM $ "argtype:" <> pretty argtype
+      traceM $ "tp1:" <> pretty tp1
+      traceM $ "peelArray $ toStruct argtype" <> show (peelArray automap $ toStruct argtype)
+
+      let peeled_arg =
+            if (automap > 0 && S.null (typeVars argtype))
+              then (fromMaybe (error "") $ peelArray automap argtype)
+              else argtype
+
+      expect (mkUsage argloc "use as function argument") (toStruct tp1) (toStruct peeled_arg)
+      --expect (mkUsage argloc "use as function argument") (toStruct tp1) (toStruct argtype)
 
       -- Perform substitutions of instantiated variables in the types.
       tp1' <- normTypeFully tp1
       (tp2', ext) <- instantiateDimsInReturnType loc fname =<< normTypeFully tp2
       argtype' <- normTypeFully argtype
+      peeled_arg' <- normTypeFully peeled_arg
 
       -- Check whether this would produce an impossible return type.
       let (tp2_produced_dims, tp2_paramdims) = dimUses $ toStruct tp2'
@@ -917,18 +936,18 @@ checkApply
 
       -- Unification ignores uniqueness in higher-order arguments, so
       -- we check for that here.
-      unless (toStructural argtype' `subtypeOf` setUniqueness (toStructural tp1') Nonunique) $
+      unless (toStructural peeled_arg' `subtypeOf` setUniqueness (toStructural tp1') Nonunique) $
         typeError loc mempty "Consumption/aliasing does not match."
 
       (argext, parsubst) <-
         case pname of
           Named pname'
             | (Scalar (Prim (Signed Int64))) <- tp1' -> do
-                (d, argext) <- sizeFromArg fname argexp
-                pure
-                  ( argext,
-                    (`M.lookup` M.singleton pname' (SizeSubst d))
-                  )
+              (d, argext) <- sizeFromArg fname argexp
+              pure
+                ( argext,
+                  (`M.lookup` M.singleton pname' (SizeSubst d))
+                )
           _ -> pure (Nothing, const Nothing)
 
       -- In case a function result is not immediately bound to a name,
@@ -940,7 +959,10 @@ checkApply
       let appres = S.singleton $ AliasFree v
       let tp2'' = applySubst parsubst $ returnType appres tp2' (diet tp1') argtype'
 
-      pure (tp1', tp2'', argext, ext)
+      traceM $ "tp1':" <> show tp1'
+      traceM $ "tp2''" <> show tp2''
+
+      pure (tp1', tp2'', argext, ext, AutoMap automap)
 checkApply loc fname tfun@(Scalar TypeVar {}) arg = do
   tv <- newTypeVar loc "b"
   -- Change the uniqueness of the argument type because we never want
@@ -1033,8 +1055,8 @@ consumeArg loc (Scalar (Sum ets)) (SumDiet ds) =
   concat <$> traverse (uncurry $ consumeArg loc) (concat $ M.elems $ M.intersectionWith zip ets ds)
 consumeArg loc (Scalar (Arrow _ _ t1 _)) (FuncDiet d _)
   | not $ contravariantArg t1 d =
-      typeError loc mempty . withIndexLink "consuming-argument" $
-        "Non-consuming higher-order parameter passed consuming argument."
+    typeError loc mempty . withIndexLink "consuming-argument" $
+      "Non-consuming higher-order parameter passed consuming argument."
   where
     contravariantArg (Array _ Unique _ _) Observe =
       False
@@ -1078,7 +1100,7 @@ causalityCheck binding_body = do
               S.toList $
                 freeInType $
                   toStruct t =
-            Just $ lift $ causality what (locOf loc) d dloc t
+          Just $ lift $ causality what (locOf loc) d dloc t
         | otherwise = Nothing
 
       checkParamCausality known p =
@@ -1091,37 +1113,37 @@ causalityCheck binding_body = do
 
       onExp known (Var v (Info t) loc)
         | Just bad <- checkCausality (pquote (ppr v)) known t loc =
-            bad
+          bad
       onExp known (ProjectSection _ (Info t) loc)
         | Just bad <- checkCausality "projection section" known t loc =
-            bad
+          bad
       onExp known (IndexSection _ (Info t) loc)
         | Just bad <- checkCausality "projection section" known t loc =
-            bad
+          bad
       onExp known (OpSectionRight _ (Info t) _ _ _ loc)
         | Just bad <- checkCausality "operator section" known t loc =
-            bad
+          bad
       onExp known (OpSectionLeft _ (Info t) _ _ _ loc)
         | Just bad <- checkCausality "operator section" known t loc =
-            bad
+          bad
       onExp known (ArrayLit [] (Info t) loc)
         | Just bad <- checkCausality "empty array" known t loc =
-            bad
+          bad
       onExp known (Hole (Info t) loc)
         | Just bad <- checkCausality "hole" known t loc =
-            bad
+          bad
       onExp known (Lambda params _ _ _ _)
         | bad : _ <- mapMaybe (checkParamCausality known) params =
-            bad
+          bad
       onExp known e@(AppExp (LetPat _ _ bindee_e body_e _) (Info res)) = do
         sequencePoint known bindee_e body_e $ appResExt res
         pure e
-      onExp known e@(AppExp (Apply f arg (Info (_, p)) _) (Info res)) = do
+      onExp known e@(AppExp (Apply f arg (Info (_, p, _)) _) (Info res)) = do
         sequencePoint known arg f $ maybeToList p ++ appResExt res
         pure e
       onExp
         known
-        e@(AppExp (BinOp (f, floc) ft (x, Info (_, xp)) (y, Info (_, yp)) _) (Info res)) = do
+        e@(AppExp (BinOp (f, floc) ft (x, Info (_, xp, _)) (y, Info (_, yp, _)) _) (Info res)) = do
           args_known <-
             lift $
               execStateT (sequencePoint known x y $ catMaybes [xp, yp]) mempty
@@ -1276,24 +1298,24 @@ fixOverloadedTypes tyvars_at_toplevel =
   where
     fixOverloaded (v, Overloaded ots usage)
       | Signed Int32 `elem` ots = do
-          unify usage (Scalar (TypeVar () Nonunique (qualName v) [])) $
-            Scalar $
-              Prim $
-                Signed Int32
-          when (v `S.member` tyvars_at_toplevel) $
-            warn usage "Defaulting ambiguous type to i32."
+        unify usage (Scalar (TypeVar () Nonunique (qualName v) [])) $
+          Scalar $
+            Prim $
+              Signed Int32
+        when (v `S.member` tyvars_at_toplevel) $
+          warn usage "Defaulting ambiguous type to i32."
       | FloatType Float64 `elem` ots = do
-          unify usage (Scalar (TypeVar () Nonunique (qualName v) [])) $
-            Scalar $
-              Prim $
-                FloatType Float64
-          when (v `S.member` tyvars_at_toplevel) $
-            warn usage "Defaulting ambiguous type to f64."
+        unify usage (Scalar (TypeVar () Nonunique (qualName v) [])) $
+          Scalar $
+            Prim $
+              FloatType Float64
+        when (v `S.member` tyvars_at_toplevel) $
+          warn usage "Defaulting ambiguous type to f64."
       | otherwise =
-          typeError usage mempty . withIndexLink "ambiguous-type" $
-            "Type is ambiguous (could be one of"
-              <+> commasep (map ppr ots) <> ")."
-              </> "Add a type annotation to disambiguate the type."
+        typeError usage mempty . withIndexLink "ambiguous-type" $
+          "Type is ambiguous (could be one of"
+            <+> commasep (map ppr ots) <> ")."
+            </> "Add a type annotation to disambiguate the type."
     fixOverloaded (v, NoConstraint _ usage) = do
       -- See #1552.
       unify usage (Scalar (TypeVar () Nonunique (qualName v) [])) $
@@ -1354,13 +1376,13 @@ checkReturnAlias loc rettp params =
   where
     checkReturnAlias' params' seen (Unique, names)
       | any (`S.member` S.map snd seen) $ S.toList names =
-          uniqueReturnAliased loc
+        uniqueReturnAliased loc
       | otherwise = do
-          notAliasingParam params' names
-          pure $ seen `S.union` tag Unique names
+        notAliasingParam params' names
+        pure $ seen `S.union` tag Unique names
     checkReturnAlias' _ seen (Nonunique, names)
       | any (`S.member` seen) $ S.toList $ tag Unique names =
-          uniqueReturnAliased loc
+        uniqueReturnAliased loc
       | otherwise = pure $ seen `S.union` tag Nonunique names
 
     notAliasingParam params' names =
@@ -1421,10 +1443,10 @@ checkBinding (fname, maybe_retdecl, tparams, params, body, loc) =
         pure (Just retdecl', ret')
       Nothing
         | null params ->
-            pure (Nothing, toStruct $ body_t `setUniqueness` Nonunique)
+          pure (Nothing, toStruct $ body_t `setUniqueness` Nonunique)
         | otherwise -> do
-            body_t' <- inferredReturnType loc params'' body_t
-            pure (Nothing, body_t')
+          body_t' <- inferredReturnType loc params'' body_t
+          pure (Nothing, body_t')
 
     verifyFunctionParams (Just fname) params''
 
@@ -1480,9 +1502,9 @@ inferReturnUniqueness params t =
       delve t'
         | all (`S.member` uniques) (boundArrayAliases t'),
           not $ any ((`S.member` forbidden) . aliasVar) (aliases t') =
-            t' `setUniqueness` Unique
+          t' `setUniqueness` Unique
         | otherwise =
-            t' `setUniqueness` Nonunique
+          t' `setUniqueness` Nonunique
    in delve t
 
 -- An alias inhibits uniqueness if it is used in disjoint values.
@@ -1532,18 +1554,18 @@ verifyFunctionParams fname params =
   where
     verifyParams forbidden (p : ps)
       | d : _ <- S.toList $ freeInPat p `S.intersection` forbidden =
-          typeError p mempty . withIndexLink "inaccessible-size" $
-            "Parameter"
-              <+> pquote (ppr p)
-              <+/> "refers to size"
-              <+> pquote (pprName d)
-                <> comma
-              <+/> textwrap "which will not be accessible to the caller"
-                <> comma
-              <+/> textwrap "possibly because it is nested in a tuple or record."
-              <+/> textwrap "Consider ascribing an explicit type that does not reference "
-                <> pquote (pprName d)
-                <> "."
+        typeError p mempty . withIndexLink "inaccessible-size" $
+          "Parameter"
+            <+> pquote (ppr p)
+            <+/> "refers to size"
+            <+> pquote (pprName d)
+              <> comma
+            <+/> textwrap "which will not be accessible to the caller"
+              <> comma
+            <+/> textwrap "possibly because it is nested in a tuple or record."
+            <+/> textwrap "Consider ascribing an explicit type that does not reference "
+              <> pquote (pprName d)
+              <> "."
       | otherwise = verifyParams forbidden' ps
       where
         forbidden' =
@@ -1617,7 +1639,7 @@ closeOverTypes defname defloc tparams paramts ret substs = do
     -- Avoid duplicate type parameters.
     closeOver (k, _)
       | k `elem` map typeParamName tparams =
-          pure Nothing
+        pure Nothing
     closeOver (k, NoConstraint l usage) =
       pure $ Just $ Left $ TypeParamType l k $ srclocOf usage
     closeOver (k, ParamType l loc) =
@@ -1627,16 +1649,16 @@ closeOverTypes defname defloc tparams paramts ret substs = do
     closeOver (k, UnknowableSize _ _)
       | k `S.member` param_sizes,
         k `S.notMember` produced_sizes = do
-          notes <- dimNotes defloc $ NamedSize $ qualName k
-          typeError defloc notes . withIndexLink "unknowable-param-def" $
-            "Unknowable size"
-              <+> pquote (pprName k)
-              <+> "in parameter of"
-              <+> pquote (pprName defname)
-                <> ", which is inferred as:"
-              </> indent 2 (ppr t)
+        notes <- dimNotes defloc $ NamedSize $ qualName k
+        typeError defloc notes . withIndexLink "unknowable-param-def" $
+          "Unknowable size"
+            <+> pquote (pprName k)
+            <+> "in parameter of"
+            <+> pquote (pprName defname)
+              <> ", which is inferred as:"
+            </> indent 2 (ppr t)
       | k `S.member` produced_sizes =
-          pure $ Just $ Right k
+        pure $ Just $ Right k
     closeOver (_, _) =
       pure Nothing
 

@@ -24,6 +24,7 @@ import Control.Monad.State
 import Data.List (delete, find, foldl')
 import qualified Data.Map.Strict as M
 import Data.Maybe
+import Debug.Trace
 import Futhark.IR.SOACS as I
 import Futhark.Internalise.Monad
 import qualified Language.Futhark as E
@@ -74,12 +75,28 @@ internaliseLoopParamType et ts =
 
 internaliseReturnType ::
   E.StructRetType ->
-  [TypeBase shape u] ->
+  [TypeBase Shape u] ->
   InternaliseM [I.TypeBase ExtShape Uniqueness]
-internaliseReturnType (E.RetType dims et) ts =
-  fixupTypes ts <$> runInternaliseTypeM' dims (internaliseTypeM exts et)
+internaliseReturnType (E.RetType dims et) ts = do
+  ts' <- runInternaliseTypeM' dims (internaliseTypeM exts et)
+  let ts'' = fixupTypes ts ts'
+      ts''' =
+        zipWith
+          ( \t t' ->
+              let d = rank_diff t t'
+               in if d > 0
+                    then --then setArrayShape t' (fmap Free $ arrayShape t)
+
+                      let Shape ss = arrayShape t
+                       in arrayOf t' (Shape $ map Free $ take d ss) Unique
+                    else t'
+          )
+          ts
+          ts''
+  pure ts'''
   where
     exts = M.fromList $ zip dims [0 ..]
+    rank_diff t1 t2 = I.arrayRank t1 - I.arrayRank t2
 
 internaliseLambdaReturnType ::
   E.TypeBase E.Size () ->
@@ -125,10 +142,10 @@ internaliseDim exts d =
     namedDim (E.QualName _ name)
       | Just x <- name `M.lookup` exts = pure $ I.Ext x
       | otherwise = do
-          subst <- liftInternaliseM $ lookupSubst name
-          case subst of
-            Just [v] -> pure $ I.Free v
-            _ -> pure $ I.Free $ I.Var name
+        subst <- liftInternaliseM $ lookupSubst name
+        case subst of
+          Just [v] -> pure $ I.Free v
+          _ -> pure $ I.Free $ I.Var name
 
 internaliseTypeM ::
   M.Map VName Int ->
@@ -147,14 +164,14 @@ internaliseTypeM exts orig_t =
       -- arrays of unit will lose their sizes.
       | null ets -> pure [I.Prim I.Unit]
       | otherwise ->
-          concat <$> mapM (internaliseTypeM exts . snd) (E.sortFields ets)
+        concat <$> mapM (internaliseTypeM exts . snd) (E.sortFields ets)
     E.Scalar (E.TypeVar _ u tn [E.TypeArgType arr_t _])
       | baseTag (E.qualLeaf tn) <= E.maxIntrinsicTag,
         baseString (E.qualLeaf tn) == "acc" -> do
-          ts <- map (fromDecl . onAccType) <$> internaliseTypeM exts arr_t
-          acc_param <- liftInternaliseM $ newVName "acc_cert"
-          let acc_t = Acc acc_param (Shape [arraysSize 0 ts]) (map rowType ts) $ internaliseUniqueness u
-          pure [acc_t]
+        ts <- map (fromDecl . onAccType) <$> internaliseTypeM exts arr_t
+        acc_param <- liftInternaliseM $ newVName "acc_cert"
+        let acc_t = Acc acc_param (Shape [arraysSize 0 ts]) (map rowType ts) $ internaliseUniqueness u
+        pure [acc_t]
     E.Scalar E.TypeVar {} ->
       error "internaliseTypeM: cannot handle type variable."
     E.Scalar E.Arrow {} ->
@@ -185,15 +202,15 @@ internaliseConstructors cs =
       where
         f (ts', js, new_ts) t
           | Just (_, j) <- find ((== fromDecl t) . fst) ts' =
-              ( delete (fromDecl t, j) ts',
-                js ++ [j],
-                new_ts
-              )
+            ( delete (fromDecl t, j) ts',
+              js ++ [j],
+              new_ts
+            )
           | otherwise =
-              ( ts',
-                js ++ [length ts + length new_ts],
-                new_ts ++ [t]
-              )
+            ( ts',
+              js ++ [length ts + length new_ts],
+              new_ts ++ [t]
+            )
 
 internaliseSumType ::
   M.Map Name [E.StructType] ->

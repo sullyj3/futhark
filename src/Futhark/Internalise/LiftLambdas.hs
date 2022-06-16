@@ -60,7 +60,7 @@ replacing v e = local $ \env ->
 existentials :: Exp -> S.Set VName
 existentials e =
   let here = case e of
-        AppExp (Apply _ _ (Info (_, pdim)) _) (Info res) ->
+        AppExp (Apply _ _ (Info (_, pdim, _)) _) (Info res) ->
           S.fromList (maybeToList pdim ++ appResExt res)
         AppExp _ (Info res) ->
           S.fromList (appResExt res)
@@ -119,10 +119,10 @@ liftFunction fname tparams params (RetType dims ret) funbody = do
         valBindEntryPoint = Nothing
       }
 
-  pure
-    $ apply
+  pure $
+    apply
       (Var (qualName fname) (Info (augType $ free_dims ++ free_nondims)) mempty)
-    $ free_dims ++ free_nondims
+      $ free_dims ++ free_nondims
   where
     orig_type = funType params $ RetType dims ret
     mkParam (v, t) = Id v (Info (fromStruct t)) mempty
@@ -133,7 +133,7 @@ liftFunction fname tparams params (RetType dims ret) funbody = do
     apply f [] = f
     apply f (p : rem_ps) =
       let inner_ret = AppRes (fromStruct (augType rem_ps)) mempty
-          inner = AppExp (Apply f (freeVar p) (Info (Observe, Nothing)) mempty) (Info inner_ret)
+          inner = AppExp (Apply f (freeVar p) (Info (Observe, Nothing, AutoMap 0)) mempty) (Info inner_ret)
        in apply inner rem_ps
 
 transformExp :: Exp -> LiftM Exp

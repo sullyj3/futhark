@@ -95,6 +95,7 @@ module Language.Futhark.Syntax
     Alias (..),
     Aliasing,
     QualName (..),
+    AutoMap (..),
   )
 where
 
@@ -628,6 +629,8 @@ data SizeBinder vn = SizeBinder {sizeName :: !vn, sizeLoc :: !SrcLoc}
 instance Located (SizeBinder vn) where
   locOf = locOf . sizeLoc
 
+newtype AutoMap = AutoMap Int deriving (Eq, Ord, Show)
+
 -- | An "application expression" is a semantic (not syntactic)
 -- grouping of expressions that have "funcall-like" semantics, mostly
 -- meaning that they can return existential sizes.  In our type
@@ -644,7 +647,7 @@ data AppExpBase f vn
     Apply
       (ExpBase f vn)
       (ExpBase f vn)
-      (f (Diet, Maybe VName))
+      (f (Diet, Maybe VName, AutoMap))
       SrcLoc
   | -- | Size coercion: @e :> t@.
     Coerce (ExpBase f vn) (TypeExp vn) SrcLoc
@@ -680,8 +683,8 @@ data AppExpBase f vn
   | BinOp
       (QualName vn, SrcLoc)
       (f PatType)
-      (ExpBase f vn, f (StructType, Maybe VName))
-      (ExpBase f vn, f (StructType, Maybe VName))
+      (ExpBase f vn, f (StructType, Maybe VName, AutoMap))
+      (ExpBase f vn, f (StructType, Maybe VName, AutoMap))
       SrcLoc
   | LetWith
       (IdentBase f vn)
