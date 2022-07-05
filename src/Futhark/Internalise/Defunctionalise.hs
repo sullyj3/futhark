@@ -732,7 +732,7 @@ etaExpand e_t e = do
         foldl'
           ( \e1 (e2, t2, argtypes) ->
               AppExp
-                (Apply e1 e2 (Info (diet t2, Nothing, AutoMap 0)) mempty)
+                (Apply e1 e2 (Info (diet t2, Nothing, mempty)) mempty)
                 (Info (AppRes (foldFunType argtypes ret) []))
           )
           e
@@ -907,7 +907,7 @@ defuncApply depth e@(AppExp (Apply e1 e2 d loc) t@(Info (AppRes ret ext))) = do
             ( AppExp
                 ( Apply
                     ( AppExp
-                        (Apply fname'' e1' (Info (Observe, Nothing, AutoMap 0)) loc)
+                        (Apply fname'' e1' (Info (Observe, Nothing, mempty)) loc)
                         ( Info $
                             AppRes
                               ( Scalar $

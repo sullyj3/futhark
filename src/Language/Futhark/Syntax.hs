@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE Strict #-}
 
 -- | The Futhark source language AST definition.  Many types, such as
@@ -27,6 +28,7 @@ module Language.Futhark.Syntax
     Shape (..),
     shapeRank,
     stripDims,
+    takeDims,
     TypeBase (..),
     TypeArg (..),
     SizeExp (..),
@@ -95,7 +97,8 @@ module Language.Futhark.Syntax
     Alias (..),
     Aliasing,
     QualName (..),
-    AutoMap (..),
+    AutoMap,
+    AutoMapBase (..),
   )
 where
 
@@ -265,6 +268,11 @@ stripDims :: Int -> Shape dim -> Maybe (Shape dim)
 stripDims i (Shape l)
   | i < length l = Just $ Shape $ drop i l
   | otherwise = Nothing
+
+-- | @takeDims n shape@ takes the outer @n@ dimensions from
+-- @shape@. If @shape@ has m <= n dimensions, it returns $shape$.
+takeDims :: Int -> Shape dim -> Shape dim
+takeDims i (Shape l) = Shape $ take i l
 
 -- | The name (if any) of a function parameter.  The 'Eq' and 'Ord'
 -- instances always compare values of this type equal.
@@ -629,7 +637,10 @@ data SizeBinder vn = SizeBinder {sizeName :: !vn, sizeLoc :: !SrcLoc}
 instance Located (SizeBinder vn) where
   locOf = locOf . sizeLoc
 
-newtype AutoMap = AutoMap Int deriving (Eq, Ord, Show)
+newtype AutoMapBase dim = AutoMap { automapShape :: Shape dim }
+  deriving (Eq, Ord, Show, Monoid, Semigroup, Functor)
+
+type AutoMap = AutoMapBase Size
 
 -- | An "application expression" is a semantic (not syntactic)
 -- grouping of expressions that have "funcall-like" semantics, mostly

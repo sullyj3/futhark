@@ -53,6 +53,7 @@ module Futhark.IR.TypeCheck
 where
 
 import Control.Monad.Reader
+import Debug.Trace
 import Control.Monad.State.Strict
 import Control.Parallel.Strategies
 import Data.List (find, intercalate, isPrefixOf, sort)
@@ -1280,7 +1281,7 @@ checkStm ::
 checkStm stm@(Let pat (StmAux (Certs cs) _ (_, dec)) e) m = do
   context "When checking certificates" $ mapM_ (requireI [Prim Unit]) cs
   context "When checking expression annotation" $ checkExpDec dec
-  context ("When matching\n" ++ message "  " pat ++ "\nwith\n" ++ message "  " e) $
+  context ("When matching\n" ++ message "  " pat ++ "\nwith\n" ++ message "  " e) $ do
     matchPat pat e
   binding (maybeWithoutAliases $ scopeOf stm) $ do
     mapM_ checkPatElem (patElems $ removePatAliases pat)

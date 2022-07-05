@@ -133,7 +133,7 @@ liftFunction fname tparams params (RetType dims ret) funbody = do
     apply f [] = f
     apply f (p : rem_ps) =
       let inner_ret = AppRes (fromStruct (augType rem_ps)) mempty
-          inner = AppExp (Apply f (freeVar p) (Info (Observe, Nothing, AutoMap 0)) mempty) (Info inner_ret)
+          inner = AppExp (Apply f (freeVar p) (Info (Observe, Nothing, mempty)) mempty) (Info inner_ret)
        in apply inner rem_ps
 
 transformExp :: Exp -> LiftM Exp

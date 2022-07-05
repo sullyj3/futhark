@@ -315,7 +315,7 @@ instance Pretty Checking where
               <+> "to"
               <+> pquote (shorten $ pretty $ flatten $ ppr e) <> " (invalid type)."
   ppr (CheckingReturn expected actual) =
-    "Function body does not have expected type."
+   "Function body does not have expected type."
       </> "Expected:"
       <+> align (ppr expected)
       </> "Actual:  "

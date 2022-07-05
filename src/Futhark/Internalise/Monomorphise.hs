@@ -226,7 +226,7 @@ transformFName loc fname t
     applySizeArg (i, f) size_arg =
       ( i - 1,
         AppExp
-          (Apply f size_arg (Info (Observe, Nothing, AutoMap 0)) loc)
+          (Apply f size_arg (Info (Observe, Nothing, mempty)) loc)
           (Info $ AppRes (foldFunType (replicate i i64) (RetType [] (fromStruct t))) [])
       )
 
@@ -317,143 +317,7 @@ transformAppExp (LetFun fname (tparams, params, retdecl, Info ret, body) e loc) 
 transformAppExp (If e1 e2 e3 loc) res =
   AppExp <$> (If <$> transformExp e1 <*> transformExp e2 <*> transformExp e3 <*> pure loc) <*> pure (Info res)
 transformAppExp (Apply e1 e2 d loc) res = do
-  --app <- AppExp <$> (Apply <$> transformExp e1 <*> transformExp e2 <*> pure d <*> pure loc) <*> pure (Info res)
   AppExp <$> (Apply <$> transformExp e1 <*> transformExp e2 <*> pure d <*> pure loc) <*> pure (Info res)
-  where
-    --traceM $ show (unfold_apply app)
-    --(pats, body, tp) <- etaExpand (typeOf $ root app) (root app) (unfold_apply app)
-    --let l = Lambda pats body Nothing (Info (mempty, tp)) mempty
-    --let fun_type =
-    --      case typeOf e1 of
-    --        t@(Scalar (Arrow as p t1 t2)) ->
-    --          Scalar $ Arrow as Unnamed (arrayOf Nonunique (arrayShape $ typeOf e2) t1) (t2 {retType = (arrayOf Nonunique (arrayShape $ typeOf e2) (retType t2))})
-    --        _ -> error ""
-    --let res =
-    --      AppExp
-    --        ( Apply
-    --            ( AppExp
-    --                ( Apply
-    --                    (Var (qualName "map"))
-    --                    l
-    --                    --(Info (mempty, arrayOf Unique (typeof e1) (arrayShape $ typeOf e2), AutoMap 0))
-
-    --                    (Info (mempty, Observe, AutoMap 0))
-    --                    mempty
-    --                )
-    --                (Info $ AppRes fun_type mempty)
-    --            )
-    --            e2
-    --            (Info (mempty, Observe, AutoMap 0))
-    --            mempty
-    --        )
-    --        (Info $ AppRes (arrayOf Unique (arrayShape $ typeOf e2) tp) mempty)
-    --traceM $ pretty res
-    --let args = apply_args app
-    --    f = root_func app
-    --traceM $ "f: " <> pretty f
-    --traceM $ "args: " <> show args
-    --e' <- automap f args
-    --case e' of
-    --  (AppExp (Apply e1 e2 d loc) (Info res)) ->
-    --    AppExp <$> (Apply <$> transformExp e1 <*> transformExp e2 <*> pure d <*> pure loc) <*> pure (Info res)
-    --  _ -> error ""
-
-    --pure app
-
-    root_func (AppExp (Apply e1' e2' (Info (_, _, am)) _) _) = root_func e1'
-    root_func f = f
-
-    apply_args (AppExp (Apply e1' e2' (Info (_, _, am)) _) _) =
-      apply_args e1' ++ [(am, e2')]
-    apply_args f = mempty
-
-    unfold_fun_type_params (RetType _ (Scalar (Arrow _ p t1 t2))) =
-      let (ps, r) = unfold_fun_type_params t2
-       in ((p, t1) : ps, r)
-    unfold_fun_type_params t = (mempty, t)
-
-    toAutoMap (AutoMap x) = x > 0
-
-    eta_expand :: Exp -> [(AutoMap, Exp)] -> MonoM ([Pat], Exp, StructRetType)
-    eta_expand f args = do
-      let (ps, r) = unfold_fun_type_params $ RetType [] $ typeOf f
-      (pats, vars) <- fmap (first catMaybes . unzip) . forM (zip ps args) $ \((p, t), (am@(AutoMap d), argexp)) -> do
-        if toAutoMap am
-          then do
-            traceM $ "t: " <> pretty t
-            traceM $ "am: " <> show am
-            traceM $ "argexp :" <> pretty argexp
-            let t' = fromMaybe (error "") $ peelArray d $ fromStruct $ typeOf argexp
-            x <- case p of
-              Named x -> pure x
-              Unnamed -> newNameFromString "x"
-            pure
-              ( Just $ Id x (Info t') mempty,
-                Var (qualName x) (Info t') mempty
-              )
-          else pure (Nothing, argexp)
-
-      let e' =
-            foldl'
-              ( \e1 (e2, t2, argtypes) ->
-                  AppExp
-                    (Apply e1 e2 (Info (diet t2, Nothing, AutoMap 0)) mempty)
-                    (Info (AppRes (foldFunType argtypes r) []))
-              )
-              f
-              $ zip3 vars (map snd ps) (drop 1 $ tails $ map snd ps)
-
-      pure (pats, e', second (const ()) r)
-
-    insert_map :: Exp -> [(AutoMap, Exp)] -> MonoM Exp
-    insert_map e args = do
-      let f = root_func e
-      (pats, body, rt) <- eta_expand f args
-      let l = Lambda pats body Nothing (Info (mempty, rt)) mempty
-          n = length pats
-          map_args = filter (toAutoMap . fst) args
-          map_args_t = map (typeOf . snd) map_args
-          map_rt =
-            let (AutoMap d, argexp) = head args
-             in arrayOf Unique (arrayShape $ stripArray (d - 1) (typeOf argexp)) $ retType rt
-          map_rts = foldFunType (map (\(AutoMap d, argexp) -> stripArray (d - 1) (typeOf argexp)) map_args) (RetType mempty map_rt)
-          map_f_t = foldFunType map_args_t $ RetType mempty $ retType rt
-          map_t = foldFunType [map_f_t] $ RetType mempty map_rt
-      traceM $ "map_t: " <> pretty map_t
-      traceM $ "map_rt: " <> pretty map_rt
-      traceM $ "map_rts: " <> pretty map_rts
-      fname <- newNameFromString $ "map" ++ if n > 1 then show n else ""
-      pure $ AppExp (Apply (Var (qualName $ fname) (Info $ fromStruct $ map_t) mempty) l (Info (diet $ typeOf l, Nothing, AutoMap 0)) mempty) (Info $ AppRes (fromStruct map_rts) mempty)
-
-    foldApply :: Exp -> [Exp] -> Exp
-    foldApply f args =
-      let (ps, r) = unfold_fun_type_params $ RetType [] $ typeOf f
-       in foldl'
-            ( \e1 (e2, t2, argtypes) ->
-                AppExp
-                  (Apply e1 e2 (Info (diet t2, Nothing, AutoMap 0)) mempty)
-                  (Info (AppRes (foldFunType argtypes r) []))
-            )
-            f
-            $ zip3 args (map snd ps) (drop 1 $ tails $ map snd ps)
-
-    automap :: Exp -> [(AutoMap, Exp)] -> MonoM Exp
-    automap f args
-      | not $ any (toAutoMap . fst) args = do
-        traceM $ "f: " <> pretty f
-        traceM $ "args: " <> show args
-        traceM $ "typeOf f: " <> pretty (typeOf f)
-        let (ps, r) = unfold_fun_type_params $ RetType [] $ typeOf f
-        traceM $ "ps :" <> show ps
-        traceM $ "foldApply: " <> pretty (foldApply f $ map snd args)
-
-        pure $ foldApply f $ map snd args
-      | otherwise = do
-        traceM $ "f: " <> pretty f
-        traceM $ "args: " <> show args
-        f' <- insert_map f args
-        let args' = map (first $ (\(AutoMap x) -> AutoMap (x - 1))) $ filter (toAutoMap . fst) args
-        automap f' args'
 transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
   e1' <- transformExp e1
   form' <- case form of
@@ -679,7 +543,7 @@ desugarBinOpSection op e_left e_right t (xp, xtype, xext) (yp, ytype, yext) (Ret
           ( Apply
               op
               e1
-              (Info (Observe, xext, AutoMap 0)) -- FIXME
+              (Info (Observe, xext, mempty)) -- FIXME
               loc
           )
           (Info $ AppRes (Scalar $ Arrow mempty yp ytype (RetType [] t)) [])
@@ -694,7 +558,7 @@ desugarBinOpSection op e_left e_right t (xp, xtype, xext) (yp, ytype, yext) (Ret
           ( Apply
               apply_left
               e2
-              (Info (Observe, yext, AutoMap 0)) -- FIXME
+              (Info (Observe, yext, mempty)) -- FIXME
               loc
           )
           (Info $ AppRes rettype' retext)

@@ -2151,12 +2151,10 @@ funcall desc qfname@(QualName _ fname) args loc = do
       (shapeargs ++ args)
 
   argts' <- mapM subExpType args'
-  --(argts_shape', argts') <- splitAt (length shapeargs) <$> mapM subExpType args'
 
   traceM $ "fun_param: " <> pretty fun_params
   traceM $ "argt': " <> pretty argts'
   let ds = max_depths argts' fun_params
-  --ses <- expand args argts ds $ maximum ds
 
   let argts'' =
         zipWith
@@ -2182,13 +2180,11 @@ funcall desc qfname@(QualName _ fname) args loc = do
 
   traceM $ "args': " <> pretty args'
   traceM $ "args'': " <> pretty args''
-  --traceM $ "argts_shape': " <> pretty argts_shape'
   traceM $ "argts'': " <> pretty argts''
 
   traceM $ "argts': " <> pretty argts'
   traceM $ "maximum ds: " <> pretty (maximum ds)
   case rettype_fun $ zip args'' argts'' of
-    --case rettype_fun $ zip args' $ argts_shape' ++ argts'' of
     Nothing ->
       error $
         concat
@@ -2200,7 +2196,6 @@ funcall desc qfname@(QualName _ fname) args loc = do
             pretty args'',
             "\nof types\n ",
             pretty argts'',
-            --pretty (argts_shape' ++ argts''),
             "\nFunction has ",
             show (length fun_params),
             " parameters\n ",
@@ -2211,70 +2206,11 @@ funcall desc qfname@(QualName _ fname) args loc = do
       traceM $ "fix_rettype: " <> pretty (fix_rettype ts ds (maximum ds) argts')
       pure (ses, fix_rettype ts ds (maximum ds) argts')
   where
-    --safety <- askSafety
-    --attrs <- asks envAttrs
-    --ses <-
-    --  attributing attrs . letValExp' desc $
-    --    I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
-    --pure (ses, map I.fromDecl ts)
-
-    --shapeargs <- argShapes shapes fun_params argts
-    --let diets =
-    --      replicate (length shapeargs) I.ObservePrim
-    --        ++ map I.diet value_paramts
-    --args' <-
-    --  ensureArgShapes
-    --    "function arguments of wrong shape"
-    --    loc
-    --    (map I.paramName fun_params)
-    --    (map I.paramType fun_params)
-    --    (shapeargs ++ args)
-    --argts' <- mapM subExpType args'
-    --traceM $ "args: " <> pretty args
-    --traceM $ "shapeargs: " <> pretty shapeargs
-    --traceM $ "args': " <> pretty args'
-    --traceM $ "argsts' : " <> pretty argts'
-    --traceM $ "max_depth: " <> pretty (max_depths argts fun_params)
-
-    --traceM $ "automap_rettype: " <> pretty (automap_rettype_fun rettype_fun (max_depths argts fun_params) 1 (zip args' argts'))
-
-    --let ds = max_depths argts fun_params
-    --traceM $ "maximum ds: " <> pretty (maximum ds)
-    --(res, stms) <- collectStms $ expand args' argts' ds $ maximum ds
-    --traceM $ "stms: " <> pretty stms
-    --traceM $ "res: " <> pretty res
-
-    --case rettype_fun $ zip args' argts' of
-    --  Nothing ->
-    --    error $
-    --      concat
-    --        [ "Cannot apply ",
-    --          pretty fname,
-    --          " to ",
-    --          show (length args'),
-    --          " arguments\n ",
-    --          pretty args',
-    --          "\nof types\n ",
-    --          pretty argts',
-    --          "\nFunction has ",
-    --          show (length fun_params),
-    --          " parameters\n ",
-    --          pretty fun_params
-    --        ]
-    --  Just ts -> do
-    --    safety <- askSafety
-    --    attrs <- asks envAttrs
-    --    ses <-
-    --      attributing attrs . letValExp' desc $
-    --        I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
-    --    pure (ses, map I.fromDecl ts)
 
     rank_diff t1 t2 = I.arrayRank t1 - I.arrayRank t2
 
     max_depths argts fun_params =
       zipWith rank_diff argts (map I.paramType fun_params)
-
-    --to_automap = any (> 0)
 
     dimensions_to_add ds argts depth =
       let (d_max, t_max) = maximumBy (\x y -> fst x `compare` fst y) (zip ds argts)
@@ -2290,8 +2226,7 @@ funcall desc qfname@(QualName _ fname) args loc = do
       | otherwise = do
         param_args <- forM (zip3 args argts ds) $ \(se, t, d) -> do
           if d == level
-            then -- then fmap (Left . (se,)) $ newParam "x" $ I.arrayOfShape t $ I.Shape [Constant $ IntValue $ intValue Int64 $ d - 1] -- this is wrong
-              fmap (Left . (se,)) $ newParam "x" $ I.stripArray 1 t --I.arrayOfShape t $ I.Shape [Constant $ IntValue $ intValue Int64 $ d - 1] -- this is wrong
+            then fmap (Left . (se,)) $ newParam "x" $ I.stripArray 1 t
             else pure $ Right se
         let (map_args, params) = unzip $ lefts param_args
             args' =
@@ -2317,17 +2252,8 @@ funcall desc qfname@(QualName _ fname) args loc = do
         map_args_names <- forM map_args $ \se -> letExp "map_arg" $ BasicOp $ SubExp se
         t <- lookupType $ head map_args_names
 
-        --traceM $ "foo: " <> (pretty (Screma (arraySize 0 t) map_args_names $ mapSOAC lam))
-
         letValExp' "automap" $ Op $ Screma (arraySize 0 t) map_args_names $ mapSOAC lam
 
---funcall' ::
---  String ->
---  QualName VName ->
---  [SubExp] ->
---  SrcLoc ->
---  [DeclExtType] ->
---  InternaliseM ([SubExp], [I.ExtType])
 funcall' desc qfname@(QualName _ fname) args loc ts = do
   (shapes, value_paramts, fun_params, rettype_fun) <-
     lookupFunction fname
@@ -2345,33 +2271,6 @@ funcall' desc qfname@(QualName _ fname) args loc ts = do
       (map I.paramType fun_params)
       (shapeargs ++ args)
   argts' <- mapM subExpType args'
-  --traceM $ "max_depth: " <> pretty (max_depths argts fun_params)
-
-  --traceM $ "automap_rettype: " <> pretty (automap_rettype_fun rettype_fun (max_depths argts fun_params) 1 (zip args' argts'))
-
-  --let ds = max_depths argts fun_params
-  --(res, stms) <- collectStms $ expand args' argts' ds $ maximum ds
-  --traceM $ "stms: " <> pretty stms
-  --traceM $ "res: " <> pretty res
-
-  --case rettype_fun $ zip args' argts' of
-  --  Nothing ->
-  --    error $
-  --      concat
-  --        [ "Cannot apply ",
-  --          pretty fname,
-  --          " to ",
-  --          show (length args'),
-  --          " arguments\n ",
-  --          pretty args',
-  --          "\nof types\n ",
-  --          pretty argts',
-  --          "\nFunction has ",
-  --          show (length fun_params),
-  --          " parameters\n ",
-  --          pretty fun_params
-  --        ]
-  --  Just ts -> do
   safety <- askSafety
   attrs <- asks envAttrs
   ses <-
@@ -2379,151 +2278,6 @@ funcall' desc qfname@(QualName _ fname) args loc ts = do
       I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
   pure (ses, ts)
 
---funcall ::
---  String ->
---  QualName VName ->
---  [SubExp] ->
---  SrcLoc ->
---  InternaliseM ([SubExp], [I.ExtType])
---funcall desc qfname@(QualName _ fname) args loc = do
---  (shapes, value_paramts, fun_params, rettype_fun) <-
---    lookupFunction fname
---  argts <- mapM subExpType args
---
---  shapeargs <- argShapes shapes fun_params argts
---  let diets =
---        replicate (length shapeargs) I.ObservePrim
---          ++ map I.diet value_paramts
---  args' <-
---    ensureArgShapes
---      "function arguments of wrong shape"
---      loc
---      (map I.paramName fun_params)
---      (map I.paramType fun_params)
---      (shapeargs ++ args)
---  argts' <- mapM subExpType args'
---  traceM $ "args: " <> pretty args
---  traceM $ "shapeargs: " <> pretty shapeargs
---  traceM $ "args': " <> pretty args'
---  traceM $ "argsts' : " <> pretty argts'
---  traceM $ "max_depth: " <> pretty (max_depths argts fun_params)
---
---  traceM $ "automap_rettype: " <> pretty (automap_rettype_fun rettype_fun (max_depths argts fun_params) 1 (zip args' argts'))
---
---  let ds = max_depths argts fun_params
---  --(res, stms) <- collectStms $ expand args' argts' ds $ maximum ds
---  --traceM $ "stms: " <> pretty stms
---  --traceM $ "res: " <> pretty res
---
---  case rettype_fun $ zip args' argts' of
---    Nothing ->
---      error $
---        concat
---          [ "Cannot apply ",
---            pretty fname,
---            " to ",
---            show (length args'),
---            " arguments\n ",
---            pretty args',
---            "\nof types\n ",
---            pretty argts',
---            "\nFunction has ",
---            show (length fun_params),
---            " parameters\n ",
---            pretty fun_params
---          ]
---    Just ts -> do
---      safety <- askSafety
---      attrs <- asks envAttrs
---      ses <-
---        attributing attrs . letValExp' desc $
---          I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
---      pure (ses, map I.fromDecl ts)
---  where
---    rank_diff t1 t2 = I.arrayRank t1 - I.arrayRank t2
---
---    max_depths argts fun_params =
---      zipWith rank_diff argts (map I.paramType fun_params)
---
---    --to_automap = any (> 0)
---
---    dimensions_to_add ds argts depth =
---      let (d_max, t_max) = maximumBy (\x y -> fst x `compare` fst y) (zip ds argts)
---       in --in (\(I.Shape ds) -> I.Shape $ map Free $ take depth ds) $ I.arrayShape t_max
---          (\(I.Shape ds) -> I.Shape $ take depth ds) $ I.arrayShape t_max
---
---    automap_rettype_fun :: ([(SubExp, Type)] -> Maybe [DeclExtType]) -> [Int] -> Int -> [(SubExp, Type)] -> Maybe [DeclExtType]
---    automap_rettype_fun f ds depth argts = do
---      rettypes <- f $ zipWith (\d (se, t) -> (se, fromMaybe (error "") $ I.peelArray d t)) ds argts
---      let (d_max, (_, t_max)) = maximumBy (\x y -> fst x `compare` fst y) (zip ds argts)
---          --added_dims = (\(I.Shape ds) -> I.Shape $ map Free $ take (d_max - (depth - 1)) ds) $ I.arrayShape t_max
---          added_dims = (\(I.Shape ds) -> I.Shape $ map Free $ take depth ds) $ I.arrayShape t_max
---      pure $ map (\rettype -> I.arrayOf rettype added_dims Nonunique) rettypes -- TODO: fix
---    expand args argts ds level
---      | level == 0 = fst <$> funcall desc qfname args loc
---      | otherwise = do
---        param_args <- forM (zip3 args argts ds) $ \(se, t, d) -> do
---          if d == level
---            then fmap (Left . (se,)) $ newParam "x" $ I.arrayOfShape t $ I.Shape [Constant $ IntValue $ intValue Int64 $ d - 1]
---            else pure $ Right se
---        let (map_args, params) = unzip $ lefts param_args
---            args' =
---              map
---                ( \xs -> case xs of
---                    Left (_, p) -> I.Var $ paramName p
---                    Right se -> se
---                )
---                param_args
---            argts' =
---              zipWith
---                ( \xs t -> case xs of
---                    Left _ -> I.stripArray 1 t
---                    _ -> t
---                )
---                param_args
---                argts
---            ds' = map (\d -> if d == level then d - 1 else d) ds
---        lam <-
---          mkLambda params $
---            subExpsRes <$> expand args' argts' ds' (level - 1)
---
---        map_args_names <- forM map_args $ \se -> letExp "map_arg" $ BasicOp $ SubExp se
---        t <- lookupType $ head map_args_names
---
---        letValExp' "automap" $ Op $ Screma (arraySize 0 t) map_args_names $ mapSOAC lam
-
---expand :: [Type] -> [Int] -> [DeclExtType] -> [I.Diet] -> [SubExp] -> Int -> InternaliseM [SubExp]
---expand argts ds rts diets args' depth
---  | not $ to_automap ds = do
---    safety <- askSafety
---    attrs <- asks envAttrs
---    attributing attrs . letValExp' desc $
---      I.Apply (internaliseFunName fname) (zip args' diets) rts (safety, loc, mempty)
---  | otherwise = do
---    param_args <- fmap catMaybes $
---      forM (zip3 args argts ds) $ \(se, t, d) -> do
---        if d > 0
---          then (Just . Left) <$> (newParam "x" $ I.arrayOfShape t (take_shape d new_dims))
---          else
---            if d == 0
---              then (Just . Right) <$> (letExp "x" $ BasicOp $ SubExp se)
---              else pure Nothing
---    let params = lefts param_args
---        g (Left p) = paramName p
---        g (Right v) = v
---        args'' = map g param_args
-
---    lam <- mkLambda params $
---      --ses <- expand argts (map (\x -> max 0 (x - 1) ds) ds) rts diets args' (depth - 1)
---      subExpRes <$> expand argts (map (-1) ds) rts diets args' (depth - 1)
-
---    Screma $ mapSOAC lam
---  where
---    new_dims = dimensions_to_add ds argts depth
---    take_shape n (I.Shape ds) = I.Shape (drop (length ds - n) ds)
-
---expand :: [Type] -> InternaliseM
---expand argts =
 
 -- Bind existential names defined by an expression, based on the
 -- concrete values that expression evaluated to.  This most
