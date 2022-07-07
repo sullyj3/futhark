@@ -432,7 +432,7 @@ internaliseAppExp desc (E.AppRes et ext) (E.Coerce e dt loc) = do
             ++ dt'
             ++ ["`."]
     ensureExtShape (errorMsg parts) loc (I.fromDecl t') desc e'
-internaliseAppExp desc _ e@E.Apply {} =
+internaliseAppExp desc _ e@(E.Apply _ _ (Info (_, _, automap)) _) =
   case findFuncall e of
     (FunctionHole t loc, _args) -> do
       -- The function we are supposed to call doesn't exist, but we
@@ -454,8 +454,8 @@ internaliseAppExp desc _ e@E.Apply {} =
         -- equality, but those cannot be existential), so we can safely
         -- ignore the existential dimensions.
         ()
-          | Just internalise <- isOverloadedFunction qfname (map fst args) loc ->
-            internalise desc
+          | Just internalise <- isOverloadedFunction qfname (map fst args) loc,
+            automap == mempty -> internalise desc
           | baseTag (qualLeaf qfname) <= maxIntrinsicTag,
             Just (rettype, _) <- M.lookup fname I.builtInFunctions -> do
             let tag ses = [(se, I.Observe) | se <- ses]
@@ -2125,6 +2125,11 @@ flatUpdateHelper desc loc arr1 offset slices arr2 = do
     forM (zip arrs1 arrs2) $ \(arr1', arr2') ->
       letSubExp desc $ I.BasicOp $ I.FlatUpdate arr1' slice arr2'
 
+      
+--toBeAutomapped desc qfname@(QualName _ fname) args loc = do
+--  (shapes, value_paramts, fun_params, rettype_fun) <-
+--    lookupFunction fname
+
 --funcall ::
 --  String ->
 --  QualName VName ->
@@ -2134,27 +2139,32 @@ flatUpdateHelper desc loc arr1 offset slices arr2 = do
 funcall desc qfname@(QualName _ fname) args loc = do
   (shapes, value_paramts, fun_params, rettype_fun) <-
     lookupFunction fname
-  argts <- mapM subExpType args
-
-  traceM $ "shapes : " <> pretty shapes
-  traceM $ "fun_params: " <> pretty fun_params
-  traceM $ "argts: " <> pretty argts
-
-  shapeargs <- argShapes shapes fun_params argts
-
+    
+  shapeargs <- argShapes shapes fun_params =<< mapM subExpType args
+  argts <- mapM subExpType (shapeargs ++ args)
+  let ds = max_depths argts fun_params
+  
+  --(args', _) <- collectStms $
   args' <-
+    zipWithM
+      ( \se d -> if d > 0
+                   then do
+                     x <- letExp "" $ BasicOp $ SubExp se
+                     letSubExp "" $ BasicOp $ I.Index x $ Slice $ replicate d $ I.DimFix $ Constant $ IntValue $ intValue Int64 0
+                   else pure se
+      )
+      args
+      ds
+
+  args'' <-
     ensureArgShapes
       "function arguments of wrong shape"
       loc
       (map I.paramName fun_params)
       (map I.paramType fun_params)
-      (shapeargs ++ args)
+      (shapeargs ++ args')
 
-  argts' <- mapM subExpType args'
-
-  traceM $ "fun_param: " <> pretty fun_params
-  traceM $ "argt': " <> pretty argts'
-  let ds = max_depths argts' fun_params
+  argts' <- mapM subExpType args''
 
   let argts'' =
         zipWith
@@ -2166,25 +2176,17 @@ funcall desc qfname@(QualName _ fname) args loc = do
           argts'
           ds
 
-  args'' <-
-    zipWithM
-      ( \se d ->
-          if d > 0
-            then do
-              x <- letExp "" $ BasicOp $ SubExp se
-              letSubExp "" $ BasicOp $ I.Index x $ Slice $ replicate 1 $ I.DimFix $ Constant $ IntValue $ intValue Int64 0
-            else pure se
-      )
-      args'
-      ds
-
+  traceM $ "shapes : " <> pretty shapes
+  traceM $ "fun_params: " <> pretty fun_params
+  traceM $ "argts: " <> pretty argts
+  traceM $ "fun_param: " <> pretty fun_params
+  traceM $ "argt': " <> pretty argts'
   traceM $ "args': " <> pretty args'
   traceM $ "args'': " <> pretty args''
   traceM $ "argts'': " <> pretty argts''
-
   traceM $ "argts': " <> pretty argts'
   traceM $ "maximum ds: " <> pretty (maximum ds)
-  case rettype_fun $ zip args'' argts'' of
+  case rettype_fun $ zip args'' argts' of
     Nothing ->
       error $
         concat
@@ -2206,6 +2208,12 @@ funcall desc qfname@(QualName _ fname) args loc = do
       traceM $ "fix_rettype: " <> pretty (fix_rettype ts ds (maximum ds) argts')
       pure (ses, fix_rettype ts ds (maximum ds) argts')
   where
+
+    --dims  = zipWithM $ \(p, a) -> do
+    --  t <- subExpType a
+    --  let d = rank_diff t (I.paramType p)
+    --      shapes = 
+    --  modifyArrayShape (\(Shape ds) -> Shape $ take d ds) t
 
     rank_diff t1 t2 = I.arrayRank t1 - I.arrayRank t2
 

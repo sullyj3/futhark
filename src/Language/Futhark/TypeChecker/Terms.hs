@@ -227,15 +227,24 @@ foo (Shape ds) (Array as _ (Shape ds') t) = Array mempty Unique (Shape $ ds ++ d
 checkApplyExp' :: UncheckedExp -> TermTypeM (Exp, ApplyOp, Shape Size)
 checkApplyExp' (AppExp (Apply e1 e2 _ loc) _) = do
   arg <- checkArg e2
+  let arg_type = argType arg
   (e1', (fname, i), max_ds) <- checkApplyExp' e1
   t <- expType e1'
   (t1, rt, argext, exts, automap) <- checkApply loc (fname, i) t arg
+  traceM $ "automap: " <> pretty (automapShape automap)
+  traceM $ "max_ds: " <> pretty max_ds
+  traceM $ "arg_type: " <> pretty arg_type
+  traceM $ "max : " <> pretty (max (takeDims (shapeRank $ automapShape automap) (arrayShape $ argType arg)) max_ds)
+  let automap_ds = takeDims (shapeRank $ automapShape automap) (arrayShape $ argType arg)
+      max_ds'
+        | shapeRank automap_ds > shapeRank max_ds = automap_ds
+        | otherwise = max_ds
   pure
     ( AppExp
         (Apply e1' (argExp arg) (Info (diet t1, argext, automap)) loc)
         (Info $ AppRes rt exts),
       (fname, i + 1),
-      max (takeDims (shapeRank $ automapShape automap) (arrayShape $ argType arg)) max_ds
+      max_ds'
     )
 checkApplyExp' e = do
   e' <- checkExp e
@@ -371,12 +380,10 @@ checkExp (AppExp (BinOp (op, oploc) NoInfo (e1, _) (e2, _) loc) NoInfo) = do
   (p2_t, rt', p2_ext, retext, automap2) <- checkApply loc (Just op', 1) rt e2_arg
 
   
- --let (Shape arg1) = arrayShape $ argType e1_arg
- --let (Shape arg2) = arrayShape $ argType e2_arg
- --let (AutoMap d1) = automap1
- --let (AutoMap d2) = automap2
- --let rt = getRetType ftype
- --let ts = fst $ unfoldFunType ftype
+  let (Shape arg1) = arrayShape $ argType e1_arg
+  let (Shape arg2) = arrayShape $ argType e2_arg
+  let rt = getRetType ftype
+  let ts = fst $ unfoldFunType ftype
 
   pure $
     AppExp
@@ -387,8 +394,8 @@ checkExp (AppExp (BinOp (op, oploc) NoInfo (e1, _) (e2, _) loc) NoInfo) = do
           (argExp e2_arg, Info (toStruct p2_t, p2_ext, automap2))
           loc
       )
-   --   (Info (AppRes (foo (maximum [Shape $ take d1 arg1, Shape $ take d2 arg2]) rt') retext))
-    (Info (AppRes rt' retext))
+    (Info (AppRes (foo (maximum [Shape $ take (shapeRank $ automapShape automap1) arg1, Shape $ take (shapeRank $ automapShape automap2) arg2]) rt') retext))
+   -- (Info (AppRes rt' retext))
 
   where getRetType (Scalar (Arrow _ _ _ rt)) =
           case retType rt of

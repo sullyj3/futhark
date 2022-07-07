@@ -316,7 +316,8 @@ transformAppExp (LetFun fname (tparams, params, retdecl, Info ret, body) e loc) 
       <*> pure (Info res)
 transformAppExp (If e1 e2 e3 loc) res =
   AppExp <$> (If <$> transformExp e1 <*> transformExp e2 <*> transformExp e3 <*> pure loc) <*> pure (Info res)
-transformAppExp (Apply e1 e2 d loc) res = do
+transformAppExp e@(Apply e1 e2 d loc) res = do
+  traceM $ "transformAppExpApply: " <> pretty (Apply e1 e2 d loc)
   AppExp <$> (Apply <$> transformExp e1 <*> transformExp e2 <*> pure d <*> pure loc) <*> pure (Info res)
 transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
   e1' <- transformExp e1
@@ -330,37 +331,56 @@ transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
   -- sizes for them.
   (pat_sizes, pat') <- sizesForPat pat
   pure $ AppExp (DoLoop (sparams ++ pat_sizes) pat' e1' form' e3' loc) (Info res)
-transformAppExp (BinOp (fname, _) (Info t) (e1, Info (_, d1, a1)) (e2, Info (_, d2, a2)) loc) (AppRes ret ext) = do
-  fname' <- transformFName loc fname $ toStruct t
-  e1' <- transformExp e1
-  e2' <- transformExp e2
-  if orderZero (typeOf e1') && orderZero (typeOf e2')
-    then pure $ applyOp fname' e1' e2'
-    else do
-      -- We have to flip the arguments to the function, because
-      -- operator application is left-to-right, while function
-      -- application is outside-in.  This matters when the arguments
-      -- produce existential sizes.  There are later places in the
-      -- compiler where we transform BinOp to Apply, but anything that
-      -- involves existential sizes will necessarily go through here.
-      (x_param_e, x_param) <- makeVarParam e1'
-      (y_param_e, y_param) <- makeVarParam e2'
-      -- XXX: the type annotations here are wrong, but hopefully it
-      -- doesn't matter as there will be an outer AppExp to handle
-      -- them.
-      pure $
-        AppExp
-          ( LetPat
-              []
-              x_param
-              e1'
-              ( AppExp
-                  (LetPat [] y_param e2' (applyOp fname' x_param_e y_param_e) loc)
-                  (Info $ AppRes ret mempty)
-              )
-              mempty
-          )
-          (Info (AppRes ret mempty))
+transformAppExp (BinOp (fname, op_loc) (Info t) (e1, Info (t1, d1, a1)) (e2, Info (t2, d2, a2)) loc) res@(AppRes ret ext)
+  | a1 <> a2 /= mempty = do
+       traceM $ "a1: " <> show a1
+       traceM $ "a2: " <> show a2
+       x <- newVName "x"
+       y <- newVName "y"
+       let x_t = fromStruct t1
+           y_t = fromStruct t2
+           params = [Id x (Info x_t) loc, Id y (Info y_t) loc]
+           e1' = Var (qualName x) (Info x_t) loc
+           e2' = Var (qualName y) (Info y_t) loc
+           t1' = Info (stripArray (shapeRank $ automapShape a1) t1, d1, mempty)
+           t2' = Info (stripArray (shapeRank $ automapShape a2) t2, d2, mempty)
+           lam_e = AppExp (BinOp (fname, op_loc) (Info t) (e1', t1') (e2', t2') loc) (Info (AppRes (stripArray (max (shapeRank $ automapShape a1) (shapeRank $ automapShape a2)) ret) ext))
+           lam = Lambda params lam_e Nothing (Info (mempty, RetType mempty (toStruct ret))) loc
+           app1 = AppExp (Apply lam e1 (Info (Observe, Nothing, a1)) loc)
+                      (Info $ AppRes (foldFunType [t1] $ RetType mempty ret) mempty)
+           app2 = Apply app1 e2 (Info (Observe, Nothing, a2)) loc
+       transformAppExp app2 res
+  | otherwise = do
+    fname' <- transformFName loc fname $ toStruct t
+    e1' <- transformExp e1
+    e2' <- transformExp e2
+    if orderZero (typeOf e1') && orderZero (typeOf e2')
+      then pure $ applyOp fname' e1' e2'
+      else do
+        -- We have to flip the arguments to the function, because
+        -- operator application is left-to-right, while function
+        -- application is outside-in.  This matters when the arguments
+        -- produce existential sizes.  There are later places in the
+        -- compiler where we transform BinOp to Apply, but anything that
+        -- involves existential sizes will necessarily go through here.
+        (x_param_e, x_param) <- makeVarParam e1'
+        (y_param_e, y_param) <- makeVarParam e2'
+        -- XXX: the type annotations here are wrong, but hopefully it
+        -- doesn't matter as there will be an outer AppExp to handle
+        -- them.
+        pure $
+          AppExp
+            ( LetPat
+                []
+                x_param
+                e1'
+                ( AppExp
+                    (LetPat [] y_param e2' (applyOp fname' x_param_e y_param_e) loc)
+                    (Info $ AppRes ret mempty)
+                )
+                mempty
+            )
+            (Info (AppRes ret mempty))
   where
     applyOp fname' x y =
       AppExp
