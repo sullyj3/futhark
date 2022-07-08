@@ -638,9 +638,14 @@ instance Located (SizeBinder vn) where
   locOf = locOf . sizeLoc
 
 newtype AutoMapBase dim = AutoMap { automapShape :: Shape dim }
-  deriving (Eq, Ord, Show, Monoid, Semigroup, Functor)
+  deriving (Eq, Show, Monoid, Semigroup, Functor)
+
+instance Eq dim => Ord (AutoMapBase dim) where
+  am1 <= am2 = (length . shapeDims . automapShape) am1 <= (length . shapeDims .automapShape ) am2
 
 type AutoMap = AutoMapBase Size
+
+
 
 -- | An "application expression" is a semantic (not syntactic)
 -- grouping of expressions that have "funcall-like" semantics, mostly
