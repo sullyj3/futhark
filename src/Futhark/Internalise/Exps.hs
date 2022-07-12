@@ -56,11 +56,9 @@ internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams para
 
     (body', rettype') <- buildBody $ do
       body_res <- internaliseExp (baseString fname <> "_res") body
-      traceM $ "body_res: " <> pretty body_res
       bt <- do
         v <- letExp "" $ BasicOp $ SubExp $ head body_res
         lookupType v
-      traceM $ "bt: " <> pretty bt
       rettype' <-
         fmap zeroExts . internaliseReturnType rettype =<< mapM subExpType body_res
       body_res' <-
@@ -69,9 +67,6 @@ internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams para
         ( body_res',
           replicate (length (shapeContext rettype')) (I.Prim int64) ++ rettype'
         )
-
-    traceM $ "body': " <> pretty body'
-    traceM $ "rettype': " <> pretty rettype'
 
     let all_params = shapeparams ++ concat params'
 
@@ -85,8 +80,6 @@ internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams para
             rettype'
             all_params
             body'
-
-    traceM $ "fd: " <> pretty fd
 
     if null params'
       then bindConstant fname fd
@@ -123,7 +116,6 @@ generateEntryPoint (E.EntryPoint e_params e_rettype) vb = localConstsScope $ do
           pure (ses, entry_rettype)
         Nothing -> do
           (ses, ret) <- funcall "entry_result" (E.qualName ofname) args loc
-          traceM $ "ret': " <> pretty ret
           pure (ses, [ret])
       ctx <-
         extractShapeContext (zeroExts $ concat entry_rettype)
@@ -133,26 +125,10 @@ generateEntryPoint (E.EntryPoint e_params e_rettype) vb = localConstsScope $ do
     argts <- forM args $ \se -> do
       v <- letExp "" $ BasicOp $ SubExp se
       lookupType v
-    traceM $ "args : " <> show args
-    traceM $ "argts : " <> show argts
-    traceM $ "entry_rettype: " <> pretty entry_rettype
-    traceM $ "ret : " <> pretty ret
     maybe_const <- lookupConst ofname
-    traceM $ "maybe_const: " <> show maybe_const
 
     attrs' <- internaliseAttrs attrs
 
-    traceM $
-      "fundef: "
-        <> pretty
-          ( I.FunDef
-              (Just entry')
-              attrs'
-              ("entry_" <> baseName ofname)
-              (ctx_ts ++ zeroExts (concat ret))
-              (shapeparams ++ concat params')
-              entry_body
-          )
     addFunDef $
       I.FunDef
         (Just entry')
@@ -2139,13 +2115,11 @@ flatUpdateHelper desc loc arr1 offset slices arr2 = do
 funcall desc qfname@(QualName _ fname) args loc = do
   (shapes, value_paramts, fun_params, rettype_fun) <-
     lookupFunction fname
-    
-  shapeargs <- argShapes shapes fun_params =<< mapM subExpType args
-  argts <- mapM subExpType (shapeargs ++ args)
-  let ds = max_depths argts fun_params
+
+  argts <- mapM subExpType args
+  let ds = max_depths argts $ drop (length shapes) fun_params
   
-  --(args', _) <- collectStms $
-  args' <-
+  (args', stms) <- collectStms $
     zipWithM
       ( \se d -> if d > 0
                    then do
@@ -2156,65 +2130,11 @@ funcall desc qfname@(QualName _ fname) args loc = do
       args
       ds
 
-  args'' <-
-    ensureArgShapes
-      "function arguments of wrong shape"
-      loc
-      (map I.paramName fun_params)
-      (map I.paramType fun_params)
-      (shapeargs ++ args')
-
-  argts' <- mapM subExpType args''
-
-  let argts'' =
-        zipWith
-          ( \t d ->
-              if d > 0
-                then I.stripArray d t
-                else t
-          )
-          argts'
-          ds
-
-  traceM $ "shapes : " <> pretty shapes
-  traceM $ "fun_params: " <> pretty fun_params
-  traceM $ "argts: " <> pretty argts
-  traceM $ "fun_param: " <> pretty fun_params
-  traceM $ "argt': " <> pretty argts'
-  traceM $ "args': " <> pretty args'
-  traceM $ "args'': " <> pretty args''
-  traceM $ "argts'': " <> pretty argts''
-  traceM $ "argts': " <> pretty argts'
-  traceM $ "maximum ds: " <> pretty (maximum ds)
-  case rettype_fun $ zip args'' argts' of
-    Nothing ->
-      error $
-        concat
-          [ "Cannot apply ",
-            pretty fname,
-            " to ",
-            show (length args'),
-            " arguments\n ",
-            pretty args'',
-            "\nof types\n ",
-            pretty argts'',
-            "\nFunction has ",
-            show (length fun_params),
-            " parameters\n ",
-            pretty fun_params
-          ]
-    Just ts -> do
-      ses <- expand args argts ds (maximum ds) ts
-      traceM $ "fix_rettype: " <> pretty (fix_rettype ts ds (maximum ds) argts')
-      pure (ses, fix_rettype ts ds (maximum ds) argts')
+  argts' <- inScopeOf stms $ mapM subExpType args'
+  (ses, ts) <- expand args argts ds (maximum ds)
+  pure (ses, fix_rettype ts ds (maximum ds) argts')
+  
   where
-
-    --dims  = zipWithM $ \(p, a) -> do
-    --  t <- subExpType a
-    --  let d = rank_diff t (I.paramType p)
-    --      shapes = 
-    --  modifyArrayShape (\(Shape ds) -> Shape $ take d ds) t
-
     rank_diff t1 t2 = I.arrayRank t1 - I.arrayRank t2
 
     max_depths argts fun_params =
@@ -2222,15 +2142,16 @@ funcall desc qfname@(QualName _ fname) args loc = do
 
     dimensions_to_add ds argts depth =
       let (d_max, t_max) = maximumBy (\x y -> fst x `compare` fst y) (zip ds argts)
-       in --in (\(I.Shape ds) -> I.Shape $ map Free $ take depth ds) $ I.arrayShape t_max
-          (\(I.Shape ds) -> I.Shape $ take depth ds) $ I.arrayShape t_max
+       in (\(I.Shape ds) -> I.Shape $ take depth ds) $ I.arrayShape t_max
 
     fix_rettype ts ds level argts =
       let (d_max, t_max) = maximumBy (\x y -> fst x `compare` fst y) (zip ds argts)
           added_dims = (\(I.Shape ds) -> I.Shape $ map Free $ take level ds) $ I.arrayShape t_max
        in map (\rettype -> I.arrayOf rettype added_dims Unique) ts
-    expand args argts ds level ts
-      | level == 0 = fst <$> funcall' desc qfname args loc ts
+          
+    expand args argts ds level
+      | level == 0 = do
+        funcall' desc qfname args loc
       | otherwise = do
         param_args <- forM (zip3 args argts ds) $ \(se, t, d) -> do
           if d == level
@@ -2253,24 +2174,33 @@ funcall desc qfname@(QualName _ fname) args loc = do
                 param_args
                 argts
             ds' = map (\d -> if d == level then d - 1 else d) ds
-        lam <-
-          mkLambda params $
-            subExpsRes <$> expand args' argts' ds' (level - 1) ts
 
+        ((ses, ts), lam_stms) <- collectStms $ localScope (scopeOfLParams params) $ expand args' argts' ds' (level - 1)
+
+        lam <- mkLambda params $ do
+          addStms lam_stms
+          pure $ subExpsRes ses
+            
         map_args_names <- forM map_args $ \se -> letExp "map_arg" $ BasicOp $ SubExp se
-        t <- lookupType $ head map_args_names
 
-        letValExp' "automap" $ Op $ Screma (arraySize 0 t) map_args_names $ mapSOAC lam
+        t <- lookupType $ head map_args_names -- Actually, these must all have the same size
+        
+        map_args_names' <- mapM (\se -> (letExp "reshaped" . (BasicOp . SubExp)) =<< ensureShape "foo" loc t "lol" se) (map I.Var map_args_names)
 
-funcall' desc qfname@(QualName _ fname) args loc ts = do
+        ses' <- letValExp' "automap" $ Op $ Screma (arraySize 0 t) map_args_names' $ mapSOAC lam
+        return (ses', ts)
+
+funcall' desc qfname@(QualName _ fname) args loc = do
   (shapes, value_paramts, fun_params, rettype_fun) <-
     lookupFunction fname
+
   argts <- mapM subExpType args
 
   shapeargs <- argShapes shapes fun_params argts
   let diets =
         replicate (length shapeargs) I.ObservePrim
           ++ map I.diet value_paramts
+          
   args' <-
     ensureArgShapes
       "function arguments of wrong shape"
@@ -2278,14 +2208,33 @@ funcall' desc qfname@(QualName _ fname) args loc ts = do
       (map I.paramName fun_params)
       (map I.paramType fun_params)
       (shapeargs ++ args)
+      
   argts' <- mapM subExpType args'
-  safety <- askSafety
-  attrs <- asks envAttrs
-  ses <-
-    attributing attrs . letValExp' desc $
-      I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
-  pure (ses, ts)
-
+  
+  case rettype_fun $ zip args' argts' of
+     Nothing ->
+       error $
+         concat
+           [ "Cannot apply ",
+             pretty fname,
+             " to ",
+             show (length args'),
+             " arguments\n ",
+             pretty args',
+             "\nof types\n ",
+             pretty argts',
+             "\nFunction has ",
+             show (length fun_params),
+             " parameters\n ",
+             pretty fun_params
+           ]
+     Just ts -> do
+       safety <- askSafety
+       attrs <- asks envAttrs
+       ses <-
+         attributing attrs . letValExp' desc $
+           I.Apply (internaliseFunName fname) (zip args' diets) ts (safety, loc, mempty)
+       pure (ses, map I.fromDecl ts)
 
 -- Bind existential names defined by an expression, based on the
 -- concrete values that expression evaluated to.  This most

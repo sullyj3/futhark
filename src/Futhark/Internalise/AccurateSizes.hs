@@ -17,6 +17,7 @@ import Futhark.Construct
 import Futhark.IR.SOACS
 import Futhark.Internalise.Monad
 import Futhark.Util (takeLast)
+import Debug.Trace
 
 shapeMapping ::
   (HasScope SOACS m, Monad m) =>
@@ -45,6 +46,7 @@ shapeMapping all_params value_arg_types =
 argShapes :: [VName] -> [FParam SOACS] -> [Type] -> InternaliseM [SubExp]
 argShapes shapes all_params valargts = do
   mapping <- shapeMapping all_params valargts
+  traceM $ "mapping: " <> pretty mapping
   let addShape name =
         case M.lookup name mapping of
           Just se -> se
