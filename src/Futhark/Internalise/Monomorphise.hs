@@ -204,22 +204,22 @@ transformFName :: SrcLoc -> QualName VName -> StructType -> MonoM Exp
 transformFName loc fname t
   | baseTag (qualLeaf fname) <= maxIntrinsicTag = pure $ var fname
   | otherwise = do
-    t' <- removeTypeVariablesInType t
-    let mono_t = monoType t'
-    maybe_fname <- lookupLifted (qualLeaf fname) mono_t
-    maybe_funbind <- lookupFun $ qualLeaf fname
-    case (maybe_fname, maybe_funbind) of
-      -- The function has already been monomorphised.
-      (Just (fname', infer), _) ->
-        pure $ applySizeArgs fname' t' $ infer t'
-      -- An intrinsic function.
-      (Nothing, Nothing) -> pure $ var fname
-      -- A polymorphic function.
-      (Nothing, Just funbind) -> do
-        (fname', infer, funbind') <- monomorphiseBinding False funbind mono_t
-        tell $ Seq.singleton (qualLeaf fname, funbind')
-        addLifted (qualLeaf fname) mono_t (fname', infer)
-        pure $ applySizeArgs fname' t' $ infer t'
+      t' <- removeTypeVariablesInType t
+      let mono_t = monoType t'
+      maybe_fname <- lookupLifted (qualLeaf fname) mono_t
+      maybe_funbind <- lookupFun $ qualLeaf fname
+      case (maybe_fname, maybe_funbind) of
+        -- The function has already been monomorphised.
+        (Just (fname', infer), _) ->
+          pure $ applySizeArgs fname' t' $ infer t'
+        -- An intrinsic function.
+        (Nothing, Nothing) -> pure $ var fname
+        -- A polymorphic function.
+        (Nothing, Just funbind) -> do
+          (fname', infer, funbind') <- monomorphiseBinding False funbind mono_t
+          tell $ Seq.singleton (qualLeaf fname, funbind')
+          addLifted (qualLeaf fname) mono_t (fname', infer)
+          pure $ applySizeArgs fname' t' $ infer t'
   where
     var fname' = Var fname' (Info (fromStruct t)) loc
 
@@ -253,7 +253,7 @@ transformType t = do
   rrs <- asks envRecordReplacements
   let replace (AliasBound v)
         | Just d <- M.lookup v rrs =
-          S.fromList $ map (AliasBound . fst) $ M.elems d
+            S.fromList $ map (AliasBound . fst) $ M.elems d
       replace x = S.singleton x
   -- As an attempt at an optimisation, only transform the aliases if
   -- they refer to a variable we have record-replaced.
@@ -297,23 +297,23 @@ transformAppExp (LetPat sizes pat e1 e2 loc) res = do
     <*> pure (Info res)
 transformAppExp (LetFun fname (tparams, params, retdecl, Info ret, body) e loc) res
   | not $ null tparams = do
-    -- Retrieve the lifted monomorphic function bindings that are produced,
-    -- filter those that are monomorphic versions of the current let-bound
-    -- function and insert them at this point, and propagate the rest.
-    rr <- asks envRecordReplacements
-    let funbind = PolyBinding rr (fname, tparams, params, ret, body, mempty, loc)
-    pass $ do
-      (e', bs) <- listen $ extendEnv fname funbind $ transformExp e
-      -- Do not remember this one for next time we monomorphise this
-      -- function.
-      modifyLifts $ filter ((/= fname) . fst . fst)
-      let (bs_local, bs_prop) = Seq.partition ((== fname) . fst) bs
-      pure (unfoldLetFuns (map snd $ toList bs_local) e', const bs_prop)
+      -- Retrieve the lifted monomorphic function bindings that are produced,
+      -- filter those that are monomorphic versions of the current let-bound
+      -- function and insert them at this point, and propagate the rest.
+      rr <- asks envRecordReplacements
+      let funbind = PolyBinding rr (fname, tparams, params, ret, body, mempty, loc)
+      pass $ do
+        (e', bs) <- listen $ extendEnv fname funbind $ transformExp e
+        -- Do not remember this one for next time we monomorphise this
+        -- function.
+        modifyLifts $ filter ((/= fname) . fst . fst)
+        let (bs_local, bs_prop) = Seq.partition ((== fname) . fst) bs
+        pure (unfoldLetFuns (map snd $ toList bs_local) e', const bs_prop)
   | otherwise = do
-    body' <- transformExp body
-    AppExp
-      <$> (LetFun fname (tparams, params, retdecl, Info ret, body') <$> transformExp e <*> pure loc)
-      <*> pure (Info res)
+      body' <- transformExp body
+      AppExp
+        <$> (LetFun fname (tparams, params, retdecl, Info ret, body') <$> transformExp e <*> pure loc)
+        <*> pure (Info res)
 transformAppExp (If e1 e2 e3 loc) res =
   AppExp <$> (If <$> transformExp e1 <*> transformExp e2 <*> transformExp e3 <*> pure loc) <*> pure (Info res)
 transformAppExp e@(Apply e1 e2 d loc) res = do
@@ -333,54 +333,60 @@ transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
   pure $ AppExp (DoLoop (sparams ++ pat_sizes) pat' e1' form' e3' loc) (Info res)
 transformAppExp (BinOp (fname, op_loc) (Info t) (e1, Info (t1, d1, a1)) (e2, Info (t2, d2, a2)) loc) res@(AppRes ret ext)
   | a1 <> a2 /= mempty = do
-       traceM $ "a1: " <> show a1
-       traceM $ "a2: " <> show a2
-       x <- newVName "x"
-       y <- newVName "y"
-       let x_t = fromStruct t1
-           y_t = fromStruct t2
-           params = [Id x (Info x_t) loc, Id y (Info y_t) loc]
-           e1' = Var (qualName x) (Info x_t) loc
-           e2' = Var (qualName y) (Info y_t) loc
-           t1' = Info (stripArray (shapeRank $ automapShape a1) t1, d1, mempty)
-           t2' = Info (stripArray (shapeRank $ automapShape a2) t2, d2, mempty)
-           lam_e = AppExp (BinOp (fname, op_loc) (Info t) (e1', t1') (e2', t2') loc) (Info (AppRes (stripArray (max (shapeRank $ automapShape a1) (shapeRank $ automapShape a2)) ret) ext))
-           lam = Lambda params lam_e Nothing (Info (mempty, RetType mempty (toStruct ret))) loc
-           app1 = AppExp (Apply lam e1 (Info (Observe, Nothing, a1)) loc)
-                      (Info $ AppRes (foldFunType [t1] $ RetType mempty ret) mempty)
-           app2 = Apply app1 e2 (Info (Observe, Nothing, a2)) loc
-       transformAppExp app2 res
+      -- TODO: Do this with a named function, not a lambda
+      traceM $ "a1: " <> show a1
+      traceM $ "a2: " <> show a2
+      traceM $ "t: " <> pretty t
+      x <- newVName "x"
+      y <- newVName "y"
+      f <- newVName "f"
+      let x_t = fromStruct t1
+          y_t = fromStruct t2
+          params = [Id x (Info x_t) loc, Id y (Info y_t) loc]
+          e1' = Var (qualName x) (Info x_t) loc
+          e2' = Var (qualName y) (Info y_t) loc
+          t1' = Info (stripArray (shapeRank $ automapShape a1) t1, d1, mempty)
+          t2' = Info (stripArray (shapeRank $ automapShape a2) t2, d2, mempty)
+          lam_e = AppExp (BinOp (fname, op_loc) (Info t) (e1', t1') (e2', t2') loc) (Info (AppRes (stripArray (max (shapeRank $ automapShape a1) (shapeRank $ automapShape a2)) ret) ext))
+          lam = Lambda params lam_e Nothing (Info (mempty, RetType mempty (toStruct $ snd $ unfoldFunType t))) loc
+          -- let_fun = LetFun f (params) lam_e Nothing (Info (mempty, RetType mempty (toStruct ret))) loc
+          app1 =
+            AppExp
+              (Apply lam e1 (Info (Observe, Nothing, a1)) loc)
+              (Info $ AppRes (foldFunType [t1] $ RetType mempty ret) mempty)
+          app2 = Apply app1 e2 (Info (Observe, Nothing, a2)) loc
+      transformAppExp app2 res
   | otherwise = do
-    fname' <- transformFName loc fname $ toStruct t
-    e1' <- transformExp e1
-    e2' <- transformExp e2
-    if orderZero (typeOf e1') && orderZero (typeOf e2')
-      then pure $ applyOp fname' e1' e2'
-      else do
-        -- We have to flip the arguments to the function, because
-        -- operator application is left-to-right, while function
-        -- application is outside-in.  This matters when the arguments
-        -- produce existential sizes.  There are later places in the
-        -- compiler where we transform BinOp to Apply, but anything that
-        -- involves existential sizes will necessarily go through here.
-        (x_param_e, x_param) <- makeVarParam e1'
-        (y_param_e, y_param) <- makeVarParam e2'
-        -- XXX: the type annotations here are wrong, but hopefully it
-        -- doesn't matter as there will be an outer AppExp to handle
-        -- them.
-        pure $
-          AppExp
-            ( LetPat
-                []
-                x_param
-                e1'
-                ( AppExp
-                    (LetPat [] y_param e2' (applyOp fname' x_param_e y_param_e) loc)
-                    (Info $ AppRes ret mempty)
-                )
-                mempty
-            )
-            (Info (AppRes ret mempty))
+      fname' <- transformFName loc fname $ toStruct t
+      e1' <- transformExp e1
+      e2' <- transformExp e2
+      if orderZero (typeOf e1') && orderZero (typeOf e2')
+        then pure $ applyOp fname' e1' e2'
+        else do
+          -- We have to flip the arguments to the function, because
+          -- operator application is left-to-right, while function
+          -- application is outside-in.  This matters when the arguments
+          -- produce existential sizes.  There are later places in the
+          -- compiler where we transform BinOp to Apply, but anything that
+          -- involves existential sizes will necessarily go through here.
+          (x_param_e, x_param) <- makeVarParam e1'
+          (y_param_e, y_param) <- makeVarParam e2'
+          -- XXX: the type annotations here are wrong, but hopefully it
+          -- doesn't matter as there will be an outer AppExp to handle
+          -- them.
+          pure $
+            AppExp
+              ( LetPat
+                  []
+                  x_param
+                  e1'
+                  ( AppExp
+                      (LetPat [] y_param e2' (applyOp fname' x_param_e y_param_e) loc)
+                      (Info $ AppRes ret mempty)
+                  )
+                  mempty
+              )
+              (Info (AppRes ret mempty))
   where
     applyOp fname' x y =
       AppExp
@@ -508,7 +514,7 @@ transformExp (Project n e tp loc) = do
   case maybe_fs of
     Just m
       | Just (v, _) <- M.lookup n m ->
-        pure $ Var (qualName v) tp loc
+          pure $ Var (qualName v) tp loc
     _ -> do
       e' <- transformExp e
       pure $ Project n e' tp loc
@@ -622,7 +628,7 @@ desugarProjectSection fields (Scalar (Arrow _ _ t1 (RetType dims t2))) loc = do
       case typeOf e of
         Scalar (Record fs)
           | Just t <- M.lookup field fs ->
-            Project field e (Info t) mempty
+              Project field e (Info t) mempty
         t ->
           error $
             "desugarOpSection: type "
@@ -855,7 +861,7 @@ typeSubstsM loc orig_t1 orig_t2 =
     sub t1@Array {} t2@Array {}
       | Just t1' <- peelArray (arrayRank t1) t1,
         Just t2' <- peelArray (arrayRank t1) t2 =
-        sub t1' t2'
+          sub t1' t2'
     sub (Scalar (TypeVar _ _ v _)) t =
       unless (baseTag (qualLeaf v) <= maxIntrinsicTag) $
         addSubst v $
@@ -955,11 +961,11 @@ transformValBind valbind = do
 
   when (isJust $ valBindEntryPoint valbind) $ do
     t <-
-      removeTypeVariablesInType $
-        foldFunType
+      removeTypeVariablesInType
+        $ foldFunType
           (map patternStructType (valBindParams valbind))
-          $ unInfo $
-            valBindRetType valbind
+        $ unInfo
+        $ valBindRetType valbind
     (name, infer, valbind'') <- monomorphiseBinding True valbind' $ monoType t
     tell $ Seq.singleton (name, valbind'' {valBindEntryPoint = valBindEntryPoint valbind})
     addLifted (valBindName valbind) (monoType t) (name, infer)
