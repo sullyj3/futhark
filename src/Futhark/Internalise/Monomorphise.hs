@@ -334,9 +334,6 @@ transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
 transformAppExp (BinOp (fname, op_loc) (Info t) (e1, Info (t1, d1, a1)) (e2, Info (t2, d2, a2)) loc) res@(AppRes ret ext)
   | a1 <> a2 /= mempty = do
       -- TODO: Do this with a named function, not a lambda
-      traceM $ "a1: " <> show a1
-      traceM $ "a2: " <> show a2
-      traceM $ "t: " <> pretty t
       x <- newVName "x"
       y <- newVName "y"
       f <- newVName "f"
@@ -349,7 +346,6 @@ transformAppExp (BinOp (fname, op_loc) (Info t) (e1, Info (t1, d1, a1)) (e2, Inf
           t2' = Info (stripArray (shapeRank $ automapShape a2) t2, d2, mempty)
           lam_e = AppExp (BinOp (fname, op_loc) (Info t) (e1', t1') (e2', t2') loc) (Info (AppRes (stripArray (max (shapeRank $ automapShape a1) (shapeRank $ automapShape a2)) ret) ext))
           lam = Lambda params lam_e Nothing (Info (mempty, RetType mempty (toStruct $ snd $ unfoldFunType t))) loc
-          -- let_fun = LetFun f (params) lam_e Nothing (Info (mempty, RetType mempty (toStruct ret))) loc
           app1 =
             AppExp
               (Apply lam e1 (Info (Observe, Nothing, a1)) loc)

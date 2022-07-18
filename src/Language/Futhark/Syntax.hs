@@ -1,8 +1,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE Strict #-}
 
 -- | The Futhark source language AST definition.  Many types, such as
@@ -99,6 +99,7 @@ module Language.Futhark.Syntax
     QualName (..),
     AutoMap,
     AutoMapBase (..),
+    automapShape,
   )
 where
 
@@ -637,15 +638,33 @@ data SizeBinder vn = SizeBinder {sizeName :: !vn, sizeLoc :: !SrcLoc}
 instance Located (SizeBinder vn) where
   locOf = locOf . sizeLoc
 
-newtype AutoMapBase dim = AutoMap { automapShape :: Shape dim }
-  deriving (Eq, Show, Monoid, Semigroup, Functor)
+data AutoMapBase dim
+  = AutoMap (Shape dim)
+  | AutoMapParam (Shape dim)
+  deriving (Eq, Show)
+
+instance Ord dim => Semigroup (AutoMapBase dim) where
+  AutoMap s1 <> AutoMap s2 = AutoMap $ s1 <> s2
+  AutoMapParam s1 <> AutoMapParam s2 = AutoMapParam $ s1 <> s2
+  AutoMap s <> am
+    | s == mempty = am
+  am <> AutoMap s
+    | s == mempty = am
+  am <> AutoMapParam s
+    | s == mempty = am
+  _ <> _ = error ""
+
+instance Ord dim => Monoid (AutoMapBase dim) where
+  mempty = AutoMap mempty
+
+automapShape :: AutoMapBase dim -> Shape dim
+automapShape (AutoMap s) = s
+automapShape (AutoMapParam s) = s
 
 instance Eq dim => Ord (AutoMapBase dim) where
-  am1 <= am2 = (length . shapeDims . automapShape) am1 <= (length . shapeDims .automapShape ) am2
+  am1 <= am2 = (length . shapeDims . automapShape) am1 <= (length . shapeDims . automapShape) am2
 
 type AutoMap = AutoMapBase Size
-
-
 
 -- | An "application expression" is a semantic (not syntactic)
 -- grouping of expressions that have "funcall-like" semantics, mostly
