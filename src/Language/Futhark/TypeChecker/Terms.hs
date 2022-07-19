@@ -282,12 +282,56 @@ unscopeType tloc unscoped t = do
   --    AppExp app (Info (AppRes rt exts)) -> do
   --      pure $ AppExp app $ Info $ AppRes (foo ds rt) exts
   --    _ -> pure e'
-  
 
+  
+unrollApply :: UncheckedExp -> TermTypeM (Exp, Maybe (QualName VName), [Arg])
+unrollApply (AppExp (Apply e1 e2 _ _) _) = do
+  (f, fname, args) <- unrollApply e1
+  arg2 <- checkArg e2
+  pure (f, fname, args ++ [arg2])
+unrollApply f = do
+  f' <- checkExp f
+  pure (f',
+         ( case f' of
+             Var qn _ _ -> Just qn
+             _ -> Nothing
+         ),
+         mempty)
+
+typeVarMap :: [StructType] -> [PatType] -> TermTypeM (M.Map (ScalarTypeBase Size ()) Int)
+typeVarMap tps argts = M.unionsWith min <$> zipWithM link tps argts
+  where
+    link (Scalar tv@(TypeVar {})) argt =
+      M.singleton tv <$> diff tv argt
+    link (Array _ _ ds1 tv@(TypeVar {})) argt =
+      M.singleton tv <$> diff tv (stripArray (shapeRank ds1) argt)
+    link _ _ =
+      pure mempty
+    diff tv@(TypeVar _ _ (QualName [] v) _) argt = do
+      constraints <- getConstraints
+      pure $ case snd <$> M.lookup v constraints of
+              Just Overloaded {} -> 0
+              _ -> arrayRank argt
+
+--maxRankDifference =  . map arrayRank
+--maxRankDifference [] = 0
+--maxRankDifference :: [PatType] -> (Int, Int)
+--maxRankDifference pts = (\xs -> (minimum xs, maximum xs)) $ do
+--  t1 <- pts
+--  t2 <- pts
+--  pure $ abs (arrayRank t1 - arrayRank t2)
+
+maxRankDifference :: [PatType] -> (Int, Int)
+maxRankDifference = (\xs -> (minimum xs, maximum xs)) . map arrayRank
+  
 checkApplyExp :: UncheckedExp -> TermTypeM Exp
 checkApplyExp e = do
-  traceM $ "checkApplyExp: " <> pretty e
-  (e', _, ds, _) <- checkApplyExp' e
+  (f, fname, args) <- unrollApply e
+  ft <- expType f
+  let (tps, _) = unfoldFunType ft
+  (e', ds) <- foldM (checkApp fname tps args) (f, mempty) (zip3 args tps [0..])
+  
+  --(e', _, ds, _) <- checkApplyExp' e
   traceM $ "ds:" <> show ds
   -- pure e'
   if ds == mempty
@@ -297,51 +341,124 @@ checkApplyExp e = do
         pure $ AppExp app $ Info $ AppRes (foo ds rt) exts
       _ -> pure e'
 
+   where --m tps args = fmap maxRankDifference $ typeVarMap tps (map argType args)
+         checkApp fname tps args (prev, max_ds) (arg, tp, i) = do
+           t <- expType prev
+           m <- typeVarMap tps (map argType args)
+           (t1, rt, argext, exts, automap) <- checkApply (srclocOf e) (fname, i) t tp arg m
+           let automap_ds = takeDims (shapeRank $ automapShape automap) (arrayShape $ argType arg)
+               max_ds'
+                 | shapeRank automap_ds > shapeRank max_ds = automap_ds
+                 | otherwise = max_ds
+           pure
+             ( AppExp
+                 (Apply prev (argExp arg) (Info (diet t1, argext, automap)) (srclocOf e))
+                 (Info $ AppRes rt exts),
+               max_ds'
+             )
+
+--checkApplyExp' :: Exp -> [Arg] ->
+--    TermTypeM (Exp, ApplyOp, Shape Size, [StructType])
+--checkApplyExp' f (args:args) = do
+--  
+--  arg <- checkArg e2
+--  let arg_type = argType arg
+--  (e1', (fname, i), max_ds, tps) <- checkApplyExp' e1
+--  rd <- rankDifference (tps !! i) arg_type
+--  t <- expType e1'
+--  (t1, rt, argext, exts, automap) <- checkApply loc (fname, i) t arg rd
+--  traceM $ "e: " <> pretty e
+--  traceM $ "automap: " <> pretty (automapShape automap)
+--  traceM $ "max_ds: " <> pretty max_ds
+--  traceM $ "arg_type: " <> pretty arg_type
+--  traceM $ "max : " <> pretty (max (takeDims (shapeRank $ automapShape automap) (arrayShape $ argType arg)) max_ds)
+--  traceM $ "rt: " <> pretty rt
+--  let automap_ds = takeDims (shapeRank $ automapShape automap) (arrayShape $ argType arg)
+--      max_ds'
+--        | shapeRank automap_ds > shapeRank max_ds = automap_ds
+--        | otherwise = max_ds
+--  pure
+--    ( AppExp
+--        (Apply e1' (argExp arg) (Info (diet t1, argext, automap)) loc)
+--        (Info $ AppRes rt exts),
+--      (fname, i + 1),
+--      max_ds',
+--      tps
+--    )
+--checkApplyExp' e = do
+--  e' <- checkExp e
+--  ft <- expType e'
+--  let (tps, _) = unfoldFunType ft
+--  pure
+--    ( e',
+--      ( case e' of
+--          Var qn _ _ -> Just qn
+--          _ -> Nothing,
+--        0
+--      ),
+--      mempty,
+--      tps
+--    )
+      
+
+--checkApplyExp :: UncheckedExp -> TermTypeM Exp
+--checkApplyExp e = do
+--  traceM $ "checkApplyExp: " <> pretty e
+--  (e', _, ds, _) <- checkApplyExp' e
+--  traceM $ "ds:" <> show ds
+--  -- pure e'
+--  if ds == mempty
+--    then pure e'
+--    else case e' of
+--      AppExp app (Info (AppRes rt exts)) -> do
+--        pure $ AppExp app $ Info $ AppRes (foo ds rt) exts
+--      _ -> pure e'
+
 -- 'checkApplyExp' is like 'checkExp', but tries to find the "root
 -- function", for better error messages.
-checkApplyExp' :: UncheckedExp ->
-  --[(AutoMap, StructType, StructType)] ->
-    --[StructType] ->
-    TermTypeM (Exp, ApplyOp, Shape Size, [StructType])
-checkApplyExp' e@(AppExp (Apply e1 e2 _ loc) _) = do
-  arg <- checkArg e2
-  let arg_type = argType arg
-  (e1', (fname, i), max_ds, tps) <- checkApplyExp' e1
-  rd <- rankDifference (tps !! i) arg_type
-  t <- expType e1'
-  (t1, rt, argext, exts, automap) <- checkApply loc (fname, i) t arg rd
-  traceM $ "e: " <> pretty e
-  traceM $ "automap: " <> pretty (automapShape automap)
-  traceM $ "max_ds: " <> pretty max_ds
-  traceM $ "arg_type: " <> pretty arg_type
-  traceM $ "max : " <> pretty (max (takeDims (shapeRank $ automapShape automap) (arrayShape $ argType arg)) max_ds)
-  traceM $ "rt: " <> pretty rt
-  let automap_ds = takeDims (shapeRank $ automapShape automap) (arrayShape $ argType arg)
-      max_ds'
-        | shapeRank automap_ds > shapeRank max_ds = automap_ds
-        | otherwise = max_ds
-  pure
-    ( AppExp
-        (Apply e1' (argExp arg) (Info (diet t1, argext, automap)) loc)
-        (Info $ AppRes rt exts),
-      (fname, i + 1),
-      max_ds',
-      tps
-    )
-checkApplyExp' e = do
-  e' <- checkExp e
-  ft <- expType e'
-  let (tps, _) = unfoldFunType ft
-  pure
-    ( e',
-      ( case e' of
-          Var qn _ _ -> Just qn
-          _ -> Nothing,
-        0
-      ),
-      mempty,
-      tps
-    )
+--checkApplyExp' :: UncheckedExp ->
+--  --[(AutoMap, StructType, StructType)] ->
+--    --[StructType] ->
+--    TermTypeM (Exp, ApplyOp, Shape Size, [StructType])
+--checkApplyExp' e@(AppExp (Apply e1 e2 _ loc) _) = do
+--  arg <- checkArg e2
+--  let arg_type = argType arg
+--  (e1', (fname, i), max_ds, tps) <- checkApplyExp' e1
+--  rd <- rankDifference (tps !! i) arg_type
+--  t <- expType e1'
+--  (t1, rt, argext, exts, automap) <- checkApply loc (fname, i) t arg rd
+--  traceM $ "e: " <> pretty e
+--  traceM $ "automap: " <> pretty (automapShape automap)
+--  traceM $ "max_ds: " <> pretty max_ds
+--  traceM $ "arg_type: " <> pretty arg_type
+--  traceM $ "max : " <> pretty (max (takeDims (shapeRank $ automapShape automap) (arrayShape $ argType arg)) max_ds)
+--  traceM $ "rt: " <> pretty rt
+--  let automap_ds = takeDims (shapeRank $ automapShape automap) (arrayShape $ argType arg)
+--      max_ds'
+--        | shapeRank automap_ds > shapeRank max_ds = automap_ds
+--        | otherwise = max_ds
+--  pure
+--    ( AppExp
+--        (Apply e1' (argExp arg) (Info (diet t1, argext, automap)) loc)
+--        (Info $ AppRes rt exts),
+--      (fname, i + 1),
+--      max_ds',
+--      tps
+--    )
+--checkApplyExp' e = do
+--  e' <- checkExp e
+--  ft <- expType e'
+--  let (tps, _) = unfoldFunType ft
+--  pure
+--    ( e',
+--      ( case e' of
+--          Var qn _ _ -> Just qn
+--          _ -> Nothing,
+--        0
+--      ),
+--      mempty,
+--      tps
+--    )
 
 checkExp :: UncheckedExp -> TermTypeM Exp
 checkExp (Literal val loc) =
@@ -476,8 +593,11 @@ checkExp (AppExp (BinOp (op, oploc) NoInfo (e1, _) (e2, _) loc) NoInfo) = do
   rd1 <- rankDifference (tps !! 0) $ argType e1_arg
   rd2 <- rankDifference (tps !! 1) $ argType e2_arg
 
-  (p1_t, rt, p1_ext, _, automap1) <- checkApply loc (Just op', 0) ftype e1_arg rd1
-  (p2_t, rt', p2_ext, retext, automap2) <- checkApply loc (Just op', 1) rt e2_arg rd2
+  
+  m <- typeVarMap tps (map argType [e1_arg, e2_arg])
+
+  (p1_t, rt, p1_ext, _, automap1) <- checkApply loc (Just op', 0) ftype (tps !! 0) e1_arg m
+  (p2_t, rt', p2_ext, retext, automap2) <- checkApply loc (Just op', 1) rt (tps !! 1) e2_arg m
 
   -- let ([e1tp, e2tp], _) = unfoldFunType ftype
   -- rd1 <- rankDifference e1tp $ argType e1_arg
@@ -514,6 +634,7 @@ checkExp (AppExp (BinOp (op, oploc) NoInfo (e1, _) (e2, _) loc) NoInfo) = do
   let res' = (foo (maximum [Shape $ take (shapeRank $ automapShape automap1') arg1, Shape $ take (shapeRank $ automapShape automap2') arg2]) rt')
   let stuff = (maximum [Shape $ take (shapeRank $ automapShape automap1') arg1, Shape $ take (shapeRank $ automapShape automap2') arg2]) -- should've been maximum in length.
   traceM $ "rt :" <> pretty rt
+  traceM $ "rt' :" <> pretty rt'
   traceM $ "res' :" <> pretty res'
   traceM $ "stuff :" <> pretty stuff
 
@@ -832,7 +953,7 @@ checkExp (OpSectionLeft op _ e _ _ loc) = do
   e_arg <- checkArg e
   let (t:_, _) = unfoldFunType ftype
   rd <- rankDifference t $ argType e_arg
-  (t1, rt, argext, retext, _automap) <- checkApply loc (Just op', 0) ftype e_arg rd
+  (t1, rt, argext, retext, _automap) <- checkApply loc (Just op', 0) ftype t e_arg mempty
   case (ftype, rt) of
     (Scalar (Arrow _ m1 _ _), Scalar (Arrow _ m2 t2 rettype)) ->
       pure $
@@ -849,6 +970,7 @@ checkExp (OpSectionLeft op _ e _ _ loc) = do
 checkExp (OpSectionRight op _ e _ NoInfo loc) = do
   (op', ftype) <- lookupVar loc op
   e_arg <- checkArg e
+  let (t:_, _) = unfoldFunType ftype
   case ftype of
     Scalar (Arrow as1 m1 t1 (RetType [] (Scalar (Arrow as2 m2 t2 (RetType dims2 ret))))) -> do
       rd <- rankDifference t2 $ argType e_arg
@@ -857,8 +979,9 @@ checkExp (OpSectionRight op _ e _ NoInfo loc) = do
           loc
           (Just op', 1)
           (Scalar $ Arrow as2 m2 t2 $ RetType [] $ Scalar $ Arrow as1 m1 t1 $ RetType [] ret)
+          t
           e_arg
-          rd
+          mempty
       pure $
         OpSectionRight
           op'
@@ -1060,39 +1183,37 @@ checkApply ::
   SrcLoc ->
   ApplyOp ->
   PatType ->
+  StructType ->
   Arg ->
-  Int ->
+  M.Map (ScalarTypeBase Size ()) Int ->
   TermTypeM (StructType, PatType, Maybe VName, [VName], AutoMap)
 checkApply
   loc
   (fname, _)
   ty@(Scalar (Arrow as pname tp1 tp2))
+  tp
   (argexp, argtype, dflow, argloc)
-  rd = 
+  m = 
     onFailure (CheckingApply fname argexp tp1 (toStruct argtype)) $ do
       --normed_tp1 <- normTypeFully tp1
       traceM $ "argexp: " <> pretty argexp
       traceM $ "normed_tp1: " <> pretty tp1
       traceM $ "ty: " <> pretty ty
-      traceM $ "argtype:" <> pretty  argtype
+      traceM $ "argtype:" <> pretty argtype
       traceM $ "tp1:" <> pretty tp1
+      traceM $ "m: " <> show m
+      traceM $ "tp:" <> pretty tp
+      rd <- rankDifferenceFoo m tp argtype
+      --let rd =
+      --      fromMaybe rd' $ case tp1 of
+      --                       (Scalar tv@(TypeVar {})) -> M.lookup tv m
+      --                       (Array _ _ _ tv@(TypeVar {})) -> M.lookup tv m
+      --                       _ -> Nothing
       ---- traceM $ "peelArray $ toStruct argtype" <> show (peelArray automap $ toStruct argtype)
       --rd <- rankDifference tp1 argtype
       --traceM $ "rankDiff: " <> show rd
-      let (automap, peeled_tp1, peeled_argtype)
-            | rd == 0 =
-                (mempty, toStruct tp1, toStruct argtype)
-            | rd > 0 =
-                ( AutoMap $ takeDims rd $ arrayShape argtype,
-                  toStruct tp1,
-                  toStruct $ fromMaybe (error "") $ peelArray rd argtype
-                )
-            | otherwise =
-                ( AutoMapParam $ takeDims (abs rd) $ arrayShape tp1,
-                  toStruct $ fromMaybe (error "") $ peelArray (abs rd) tp1,
-                  toStruct argtype
-                )
-                
+      let (automap, peeled_tp1, peeled_argtype) = autoMapInfo rd tp1 argtype
+      
       traceM $ "rd : " <> pretty rd
       traceM $ "peeled_tp1: " <> pretty peeled_tp1
       traceM $ "peeled_argtype: " <> pretty peeled_argtype
@@ -1174,7 +1295,7 @@ checkApply
 -- getConstraints (Scalar (TypeVar _ _ vn _))
 --  | isTypeVar t =
 
-checkApply loc fname tfun@(Scalar TypeVar {}) arg am = do
+checkApply loc fname tfun@(Scalar TypeVar {}) tp arg am = do
   tv <- newTypeVar loc "b"
   -- Change the uniqueness of the argument type because we never want
   -- to infer that a function is consuming.
@@ -1184,8 +1305,8 @@ checkApply loc fname tfun@(Scalar TypeVar {}) arg am = do
       Arrow mempty Unnamed argt_nonunique $
         RetType [] tv
   tfun' <- normPatType tfun
-  checkApply loc fname tfun' arg am
-checkApply loc (fname, prev_applied) ftype (argexp, _, _, _) _ = do
+  checkApply loc fname tfun' tp arg am
+checkApply loc (fname, prev_applied) ftype _ (argexp, _, _, _) _ = do
   let fname' = maybe "expression" (pquote . ppr) fname
 
   typeError loc mempty $
@@ -1214,55 +1335,65 @@ checkApply loc (fname, prev_applied) ftype (argexp, _, _, _) _ = do
 -- type of an applied argument. Equality operators are treated
 -- as if they only operates on primitive types
 rankDifference :: TypeBase Size () -> TypeBase Size Aliasing -> TermTypeM Int
-rankDifference tp argt = rankDifference' (toStruct tp) (toStruct argt)
-  --rd <- rankDifference' (toStruct tp) (toStruct argt)
-  --rd <- rankDifference' (toStruct tp) (toStruct argt)
-  --traceM $ "tp: " <> pretty tp
-  --traceM $ "argt: " <> pretty argt
-  --traceM $ "tp: " <> show tp
-  --traceM $ "argt: " <> show argt
-  --traceM $ "toStruct tp: " <> show (toStruct tp)
-  --traceM $ "toStruct argt: " <> show (toStruct argt)
-  --traceM $ "rankDifference: " <> pretty rd
-  --traceM $ "typeVars argt: " <> show (typeVars argt)
-  --traceM $ "typeVars tp: " <> show (typeVars tp)
-  --traceM $ "typeVars bool: " <> show (typeVars argt `S.isSubsetOf` typeVars tp)
-  --pure rd
+rankDifference tp argt = rankDifference' (toStruct tp) argt
   where
     rankDifference' tp argt
       | not (typeVars argt `S.isSubsetOf` typeVars tp) = pure 0
     rankDifference' tp@(Scalar tv@(TypeVar _ _ (QualName [] v) _)) argt@(Array _ _ _ et)
       | tv == et = pure $ arrayRank argt
-     -- | otherwise = do
-     --     constraints <- getConstraints
-     --     pure $ case snd <$> M.lookup v constraints of
-     --       Just Overloaded {} -> arrayRank argt
-     --       Just Equality {} -> arrayRank argt -- Have to assume the "worst" case for equality.
-     --       _ -> 0
+      | otherwise = do
+          constraints <- getConstraints
+          pure $ case snd <$> M.lookup v constraints of
+                  Just Overloaded {} -> arrayRank argt
+                  _ -> arrayRank argt - arrayRank tp
+    rankDifference' tp@(Array _ _ ds1 et1) argt@(Array _ _ ds2 et2)
+      | et1 == et2 = pure $ shapeRank ds2 - shapeRank ds1
+      | otherwise = pure 0
     rankDifference' tp argt = pure $ arrayRank argt - arrayRank tp
 
-autoMapInfo :: Eq Size => TypeBase Size () -> TypeBase Size Aliasing
-     -> TermTypeM (AutoMap, StructType, StructType)
-autoMapInfo tp1 argtype = do
-  traceM "autoMapInfo"
-  traceM $ "tp1: " <> pretty tp1
-  traceM $ "argtype: " <> pretty argtype
-  rd <- rankDifference tp1 argtype
-  traceM $ "rd: " <> pretty rd
-  let res 
-        | rd == 0 =
-            (mempty, toStruct tp1, toStruct argtype)
-        | rd > 0 =
-            ( AutoMap $ takeDims rd $ arrayShape argtype,
-              toStruct tp1,
-              toStruct $ fromMaybe (error "") $ peelArray rd argtype
-            )
-        | otherwise =
-            ( AutoMapParam $ takeDims (abs rd) $ arrayShape tp1,
-              toStruct $ fromMaybe (error "") $ peelArray (abs rd) tp1,
-              toStruct argtype
-            )
-  pure res
+    
+rankDifferenceFoo ::  M.Map (ScalarTypeBase Size ()) Int ->
+        TypeBase Size () -> TypeBase Size Aliasing -> TermTypeM Int
+rankDifferenceFoo m tp argt = rankDifference' (toStruct tp) argt
+  where
+    rankDifference' tp argt
+      | not (typeVars argt `S.isSubsetOf` typeVars tp) = pure 0
+    rankDifference' tp@(Scalar tv@(TypeVar _ _ (QualName [] v) _)) argt@(Array _ _ _ et)
+      | tv == et = pure $ arrayRank argt
+      | Just mini <- M.lookup tv m =
+          pure $ arrayRank argt - mini
+      | otherwise = pure 0
+    rankDifference' tp@(Array _ _ ds1 et1) argt@(Array _ _ ds2 et2)
+      | et1 == et2 = pure $ shapeRank ds2 - shapeRank ds1
+    rankDifference' tp@(Array _ _ ds tv@(TypeVar {})) argt
+      | Just mini <- M.lookup tv m =
+          pure $ arrayRank argt - (shapeRank ds + mini)
+      | otherwise = pure 0
+    rankDifference' tp argt = pure $ arrayRank argt - arrayRank tp
+    --  | otherwise = do
+    --      constraints <- getConstraints
+    --      pure $ case snd <$> M.lookup v constraints of
+    --              Just Overloaded {} -> arrayRank argt
+    --              _ -> arrayRank argt - arrayRank tp
+    --rankDifference' tp@(Array _ _ ds1 et1) argt@(Array _ _ ds2 et2)
+    --  | et1 == et2 = pure $ shapeRank ds2 - shapeRank ds1
+    --  | otherwise = pure 0
+    --rankDifference' tp argt = pure $ arrayRank argt - arrayRank tp
+
+autoMapInfo :: Eq Size => Int -> StructType -> PatType -> (AutoMap, StructType, StructType)
+autoMapInfo rd tp1 argtype
+  | rd > 0 =
+      ( AutoMap $ takeDims rd $ arrayShape argtype,
+        toStruct tp1,
+        toStruct $ fromMaybe (error "") $ peelArray rd argtype
+      )
+  | otherwise =
+      (mempty, toStruct tp1, toStruct argtype)
+ -- | otherwise =
+ --     ( AutoMapParam $ takeDims (abs rd) $ arrayShape tp1,
+ --       toStruct $ fromMaybe (error "") $ peelArray (abs rd) tp1,
+ --       toStruct argtype
+ --     )
 
 foo s t
   | s == mempty = t
