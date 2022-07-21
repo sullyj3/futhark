@@ -7,4 +7,3 @@ def (+^) [n] (xs: [n]i32) (ys: [n]i32) : [n]i32 = xs + ys
 
 entry main [n] (xss : [n][n]i32) (ys: [n]i32) : [n][n]i32 =
   xss +^ ys
-  

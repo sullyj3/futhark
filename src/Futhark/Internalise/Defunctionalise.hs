@@ -6,6 +6,7 @@
 -- | Defunctionalization of typed, monomorphic Futhark programs without modules.
 module Futhark.Internalise.Defunctionalise (transformProg) where
 
+import Debug.Trace
 import qualified Control.Arrow as Arrow
 import Control.Monad.Identity
 import Control.Monad.Reader
@@ -518,7 +519,7 @@ defuncExp (AppExp (Coerce e0 tydecl loc) res)
     (e0', sv) <- defuncExp e0
     pure (AppExp (Coerce e0' tydecl loc) res, sv)
   | otherwise = defuncExp e0
-defuncExp (AppExp (LetPat sizes pat e1 e2 loc) (Info (AppRes t retext))) = do
+defuncExp e@(AppExp (LetPat sizes pat e1 e2 loc) (Info (AppRes t retext))) = do
   (e1', sv1) <- defuncExp e1
   let env = matchPatSV pat sv1
       pat' = updatePat pat sv1
@@ -530,6 +531,7 @@ defuncExp (AppExp (LetPat sizes pat e1 e2 loc) (Info (AppRes t retext))) = do
       subst v = fromMaybe v $ M.lookup v mapping
       mapper = identityMapper {mapOnName = pure . subst}
       t' = first (runIdentity . astMap mapper) $ typeOf e2'
+  traceM $ "letpat: " <> pretty e <> "\nt' :" <> pretty t' <> "\nt: " <> pretty t <> "\n (typeOf e2): " <> pretty (typeOf e2) <>  "\n (typeOf e2'): " <> pretty (typeOf e2') 
   pure (AppExp (LetPat sizes pat' e1' e2' loc) (Info (AppRes t' retext)), sv2)
 defuncExp (AppExp (LetFun vn _ _ _) _) =
   error $ "defuncExp: Unexpected LetFun: " ++ prettyName vn
@@ -821,11 +823,12 @@ unRetType (RetType ext t) = first onDim t
 -- but a new lifted function is created if a dynamic function is only partially
 -- applied.
 defuncApply :: Int -> Exp -> DefM (Exp, StaticVal)
-defuncApply depth e@(AppExp (Apply e1 e2 d loc) t@(Info (AppRes ret ext))) = do
+defuncApply depth e@(AppExp (Apply e1 e2 d@(Info (_, _, AutoMap ds)) loc) t@(Info (AppRes ret ext))) = do
   let (argtypes, _) = unfoldFunType ret
   (e1', sv1) <- defuncApply (depth + 1) e1
   (e2', sv2) <- defuncExp e2
   let e' = AppExp (Apply e1' e2' d loc) t
+  traceM $ "\ndefuncApply: " <> pretty e <> "\n sv1: " <> show sv1 <> "\ndepth :" <> pretty depth <> "\n typeOf e: " <> pretty (typeOf e) <> "\n ret: " <> pretty ret
   case sv1 of
     LambdaSV pat e0_t e0 closure_env -> do
       let env' = matchPatSV pat sv2
@@ -847,7 +850,11 @@ defuncApply depth e@(AppExp (Apply e1 e2 d loc) t@(Info (AppRes ret ext))) = do
           params_for_rettype = params ++ svParams sv1 ++ svParams sv2
           svParams (LambdaSV sv_pat _ _ _) = [sv_pat]
           svParams _ = []
-          rettype = buildRetType closure_env params_for_rettype (unRetType e0_t) $ typeOf e0'
+          rettype
+            | ds == mempty =
+               buildRetType closure_env params_for_rettype (unRetType e0_t) $ typeOf e0'
+            | otherwise =
+               arrayOf Unique ds $ buildRetType closure_env params_for_rettype (unRetType e0_t) $ typeOf e0'
 
           already_bound =
             globals
@@ -933,7 +940,10 @@ defuncApply depth e@(AppExp (Apply e1 e2 d loc) t@(Info (AppRes ret ext))) = do
     DynamicFun _ sv -> do
       let (argtypes', rettype) = dynamicFunType sv argtypes
           restype = foldFunType argtypes' (RetType [] rettype) `setAliases` aliases ret
-          callret = AppRes (combineTypeShapes ret restype) ext
+          restype'
+            | ds == mempty = restype
+            | otherwise =  arrayOf Unique ds $ combineTypeShapes (stripArray (shapeRank ds) ret) restype
+          callret = AppRes (combineTypeShapes ret restype') ext
           apply_e = AppExp (Apply e1' e2' d loc) (Info callret)
       pure (apply_e, sv)
     -- Propagate the 'IntrinsicsSV' until we reach the outermost application,
@@ -949,6 +959,7 @@ defuncApply depth e@(AppExp (Apply e1 e2 d loc) t@(Info (AppRes ret ext))) = do
           then pure (e', Dynamic $ typeOf e)
           else do
             (pats, body, tp) <- etaExpand (typeOf e') e'
+            traceM $ "typeOf e': " <> pretty (typeOf e') <> "\tp: " <> pretty tp
             defuncExp $ Lambda pats body Nothing (Info (mempty, tp)) mempty
       | otherwise -> pure (e', IntrinsicSV)
     _ ->
@@ -1254,9 +1265,12 @@ svFromType t = Dynamic t
 -- boolean is true if the function is a 'DynamicFun'.
 defuncValBind :: ValBind -> DefM (ValBind, Env)
 -- Eta-expand entry points with a functional return type.
-defuncValBind (ValBind entry name _ (Info (RetType _ rettype)) tparams params body _ attrs loc)
+defuncValBind vb@(ValBind entry name _ (Info (RetType _ rettype)) tparams params body _ attrs loc)
   | Scalar Arrow {} <- rettype = do
     (body_pats, body', rettype') <- etaExpand (fromStruct rettype) body
+    traceM $"defunc ret: " <> pretty rettype
+    traceM $"defunc ret': " <> pretty rettype'
+    traceM $ "defuncvb: " <> pretty vb
     defuncValBind $
       ValBind
         entry
@@ -1270,6 +1284,8 @@ defuncValBind (ValBind entry name _ (Info (RetType _ rettype)) tparams params bo
         attrs
         loc
 defuncValBind valbind@(ValBind _ name retdecl (Info (RetType ret_dims rettype)) tparams params body _ _ _) = do
+  traceM $ "defuncvb: " <> pretty valbind
+  traceM $ "ret_type: " <> pretty rettype
   when (any isTypeParam tparams) $
     error $
       prettyName name
@@ -1286,8 +1302,22 @@ defuncValBind valbind@(ValBind _ name retdecl (Info (RetType ret_dims rettype)) 
         -- the types in the return type annotation.
         combineTypeShapes rettype $ first (anyDimIfNotBound bound_sizes) $ toStruct $ typeOf body'
       ret_dims' = filter (`S.member` freeInType rettype') ret_dims
+  traceM $ "ret_type': " <> pretty rettype'
   (missing_dims, params'') <- sizesForAll bound_sizes params'
 
+  traceM $ "\nold_valbind: " <> show valbind <> "\nrettype: " <> pretty rettype <> "\n typeOf body'" <> pretty (typeOf body') <> "\n typeOf body" <> pretty (typeOf body) <> "\nold_valbind: " <> pretty valbind <> "\n" <> "new_valbind: " <> pretty ( valbind
+        { valBindRetDecl = retdecl,
+          valBindRetType =
+            Info $
+              if null params'
+                then RetType ret_dims' $ rettype' `setUniqueness` Nonunique
+                else RetType ret_dims' rettype',
+          valBindTypeParams =
+            map (`TypeParamDim` mempty) $ tparams' ++ missing_dims,
+          valBindParams = params'',
+          valBindBody = body'
+        }
+    )
   pure
     ( valbind
         { valBindRetDecl = retdecl,

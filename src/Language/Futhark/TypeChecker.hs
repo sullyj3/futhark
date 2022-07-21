@@ -18,6 +18,7 @@ module Language.Futhark.TypeChecker
   )
 where
 
+import Debug.Trace
 import Control.Monad.Except
 import Control.Monad.Writer hiding (Sum)
 import Data.Bifunctor (first, second)
@@ -666,6 +667,7 @@ checkValBind (ValBind entry fname maybe_tdecl NoInfo tparams params body doc att
 
   attrs' <- mapM checkAttr attrs
   let vb = ValBind entry' fname' maybe_tdecl' (Info rettype) tparams' params' body' doc attrs' loc
+  traceM $ "vb: " <> pretty vb
   pure
     ( mempty
         { envVtable =

@@ -331,26 +331,42 @@ transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
   -- sizes for them.
   (pat_sizes, pat') <- sizesForPat pat
   pure $ AppExp (DoLoop (sparams ++ pat_sizes) pat' e1' form' e3' loc) (Info res)
-transformAppExp (BinOp (fname, op_loc) (Info t) (e1, Info (t1, d1, a1)) (e2, Info (t2, d2, a2)) loc) res@(AppRes ret ext)
+transformAppExp bop@(BinOp (fname, op_loc) (Info t) (e1, Info (t1, d1, a1)) (e2, Info (t2, d2, a2)) loc) res@(AppRes ret ext)
   | a1 <> a2 /= mempty = do
       -- TODO: Do this with a named function, not a lambda
       x <- newVName "x"
       y <- newVName "y"
       f <- newVName "f"
-      let x_t = fromStruct t1
-          y_t = fromStruct t2
+      let --x_t = fromStruct $ t1
+          --y_t = fromStruct $ t2
+          x_t = fromStruct $ stripArray (shapeRank $ automapShape a1) t1
+          y_t = fromStruct $ stripArray (shapeRank $ automapShape a2) t2
           params = [Id x (Info x_t) loc, Id y (Info y_t) loc]
           e1' = Var (qualName x) (Info x_t) loc
           e2' = Var (qualName y) (Info y_t) loc
           t1' = Info (stripArray (shapeRank $ automapShape a1) t1, d1, mempty)
           t2' = Info (stripArray (shapeRank $ automapShape a2) t2, d2, mempty)
+          --lam_e = AppExp (BinOp (fname, op_loc) (Info t) (e1', t1') (e2', t2') loc) (Info (AppRes (stripArray (max (shapeRank $ automapShape a1) (shapeRank $ automapShape a2)) ret) ext))
           lam_e = AppExp (BinOp (fname, op_loc) (Info t) (e1', t1') (e2', t2') loc) (Info (AppRes (stripArray (max (shapeRank $ automapShape a1) (shapeRank $ automapShape a2)) ret) ext))
           lam = Lambda params lam_e Nothing (Info (mempty, RetType mempty (toStruct $ snd $ unfoldFunType t))) loc
+          --lam = Lambda params lam_e Nothing (Info (mempty, RetType mempty $ toStruct ret )) loc
           app1 =
             AppExp
               (Apply lam e1 (Info (Observe, Nothing, a1)) loc)
-              (Info $ AppRes (foldFunType [t1] $ RetType mempty ret) mempty)
+              (Info $ AppRes (foldFunType [y_t] $ RetType mempty ret) mempty)
           app2 = Apply app1 e2 (Info (Observe, Nothing, a2)) loc
+      traceM $ "e1: " <> pretty e1
+      traceM $ "t1: " <> pretty t1
+      traceM $ "params: " <> pretty params
+      traceM $ "lam_e: " <> pretty lam_e
+      traceM $ "lam: " <> pretty lam
+      traceM $ "app1: " <> pretty app1
+      traceM $ "am1: " <> show a1
+      traceM $ "am2: " <> show a2
+      traceM $ "bop: " <> pretty bop
+      traceM $ "app2: " <> pretty app2
+      traceM $ "app2: " <> show app2
+      traceM $ "res: " <> show res
       transformAppExp app2 res
   | otherwise = do
       fname' <- transformFName loc fname $ toStruct t
@@ -963,6 +979,7 @@ transformValBind valbind = do
         $ unInfo
         $ valBindRetType valbind
     (name, infer, valbind'') <- monomorphiseBinding True valbind' $ monoType t
+    traceM $ "valbind'': " <> pretty valbind''
     tell $ Seq.singleton (name, valbind'' {valBindEntryPoint = valBindEntryPoint valbind})
     addLifted (valBindName valbind) (monoType t) (name, infer)
 

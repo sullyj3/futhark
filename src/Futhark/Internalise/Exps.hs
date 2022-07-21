@@ -44,6 +44,8 @@ internaliseFunName = nameFromString . pretty
 
 internaliseValBind :: E.ValBind -> InternaliseM ()
 internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams params body _ attrs loc) = do
+  traceM $ "fb: " <> pretty fb
+  traceM $ "fb: " <> show fb
   localConstsScope . bindingFParams tparams params $ \shapeparams params' -> do
     let shapenames = map I.paramName shapeparams
 
@@ -59,6 +61,7 @@ internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams para
       bt <- do
         v <- letExp "" $ BasicOp $ SubExp $ head body_res
         lookupType v
+      traceM $ "bt: " <> pretty bt
       rettype' <-
         fmap zeroExts . internaliseReturnType rettype =<< mapM subExpType body_res
       body_res' <-
@@ -72,6 +75,12 @@ internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams para
 
     attrs' <- internaliseAttrs attrs
 
+    
+    traceM $ "fname: " <> pretty fname
+    traceM $ "rettype: " <> pretty rettype
+    traceM $ "rettype': " <> pretty rettype'
+    traceM $ "all_params: " <> pretty all_params
+    
     let fd =
           I.FunDef
             Nothing
@@ -2130,6 +2139,11 @@ funcall desc qfname@(QualName _ fname) args loc = do
 
   argts' <- inScopeOf stms $ mapM subExpType args'
   (ses, ts) <- expand args argts ds (maximum ds)
+  traceM $ "fix_rettype: " <> pretty (fix_rettype ts ds (maximum ds) argts)
+  traceM $ "fix_rettype': " <> pretty (fix_rettype ts ds (maximum ds) argts')
+  traceM $ "ts : "<> pretty ts
+  traceM $ "args: " <> pretty args
+  traceM $ "argts: " <> pretty argts
   pure (ses, fix_rettype ts ds (maximum ds) argts')
   where
     rank_diff t1 t2 = I.arrayRank t1 - I.arrayRank t2
@@ -2207,6 +2221,11 @@ funcall desc qfname@(QualName _ fname) args loc = do
 
       argts' <- mapM subExpType args'
 
+      traceM "base_funcall"
+      traceM $ "args: " <> pretty args
+      traceM $ "argts: " <> pretty argts
+      traceM $ "args': " <> pretty args'
+      traceM $ "argts': " <> pretty argts'
       case rettype_fun $ zip args' argts' of
         Nothing ->
           error $
@@ -2225,6 +2244,7 @@ funcall desc qfname@(QualName _ fname) args loc = do
                 pretty fun_params
               ]
         Just ts -> do
+          traceM $ "base_funcall ts" <> pretty ts
           safety <- askSafety
           attrs <- asks envAttrs
           ses <-

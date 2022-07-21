@@ -53,6 +53,7 @@ import Futhark.Internalise.Monad as I
 import Futhark.Internalise.Monomorphise as Monomorphise
 import Futhark.Util.Log
 import Language.Futhark.Semantic (Imports)
+import Debug.Trace
 
 -- | Convert a program in source Futhark to a program in the Futhark
 -- core language.
@@ -71,6 +72,7 @@ internaliseProg config prog = do
   maybeLog "Defunctionalising"
   prog_decs''' <- Defunctionalise.transformProg prog_decs''
   maybeLog "Converting to core IR"
+  traceM $ "prog_decs''':" <> pretty prog_decs'''
   Exps.transformProg (futharkSafe config) prog_decs'''
   where
     verbose = fst (futharkVerbose config) > NotVerbose
