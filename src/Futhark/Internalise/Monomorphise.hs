@@ -86,6 +86,11 @@ data Env = Env
     envRecordReplacements :: RecordReplacements
   }
 
+data SEnv = SEnv
+  { sEnvNameSource :: VNameSource,
+    sEnvAutoMapIntrinsics :: M.Map VName ValBind
+  }
+
 instance Semigroup Env where
   Env tb1 pb1 rr1 <> Env tb2 pb2 rr2 = Env (tb1 <> tb2) (pb1 <> pb2) (rr1 <> rr2)
 
@@ -112,7 +117,7 @@ newtype MonoM a
       ( RWST
           Env
           (Seq.Seq (VName, ValBind))
-          VNameSource
+          SEnv
           (State Lifts)
           a
       )
@@ -122,13 +127,17 @@ newtype MonoM a
       Monad,
       MonadReader Env,
       MonadWriter (Seq.Seq (VName, ValBind)),
-      MonadFreshNames
+      MonadState SEnv
     )
 
-runMonoM :: VNameSource -> MonoM a -> ((a, Seq.Seq (VName, ValBind)), VNameSource)
-runMonoM src (MonoM m) = ((a, defs), src')
+instance MonadFreshNames MonoM where
+  getNameSource = gets sEnvNameSource
+  putNameSource src = modify (\senv -> senv {sEnvNameSource = src})
+
+runMonoM :: SEnv -> MonoM a -> ((a, Seq.Seq (VName, ValBind)), SEnv)
+runMonoM sEnv (MonoM m) = ((a, defs), sEnv')
   where
-    (a, src', defs) = evalState (runRWST m mempty src) mempty
+    (a, sEnv', defs) = evalState (runRWST m mempty sEnv) mempty
 
 lookupFun :: VName -> MonoM (Maybe PolyBinding)
 lookupFun vn = do
@@ -139,6 +148,13 @@ lookupFun vn = do
 
 lookupRecordReplacement :: VName -> MonoM (Maybe RecordReplacement)
 lookupRecordReplacement v = asks $ M.lookup v . envRecordReplacements
+
+lookupAutoMapIntrinsic :: QualName VName -> MonoM VName
+lookupAutoMapIntrinsic f = do
+  m <- gets sEnvAutoMapIntrinsics
+  case M.lookup (qualLeaf f) m of
+    Just vb -> pure $ valBindName vb
+    Nothing -> removeIntrinsicFun $ qualLeaf f
 
 -- Given instantiated type of function, produce size arguments.
 type InferSizeArgs = StructType -> [Exp]
@@ -186,6 +202,94 @@ monoType = (`evalState` (0, mempty)) . traverseDims onDim . toStruct
 -- Mapping from function name and instance list to a new function name in case
 -- the function has already been instantiated with those concrete types.
 type Lifts = [((VName, MonoType), (VName, InferSizeArgs))]
+
+removeIntrinsicFun :: VName -> MonoM (VName)
+removeIntrinsicFun f
+  | baseTag f <= maxIntrinsicTag = do
+      (tps, var_params, ret) <- makeRetParamTypes f
+      f' <- newName f
+      let fun_ts =
+            scanr
+              ( \(_, pt) ft ->
+                  let (p, t) = patternParam pt
+                   in Scalar (Arrow mempty p t (RetType [] ft))
+              )
+              (retType ret)
+              var_params
+          f_e = Var (QualName [] f) (Info $ fromStruct $ last fun_ts) mempty
+          body =
+            foldl
+              ( \fn ((x, pt), t) ->
+                  AppExp (Apply fn x (Info (Observe, Nothing, mempty)) mempty) (Info $ AppRes (fromStruct t) mempty)
+              )
+              f_e
+              (zip var_params fun_ts)
+
+      let vb =
+            ValBind
+              { valBindEntryPoint = Nothing,
+                valBindName = f',
+                valBindRetDecl = Nothing,
+                valBindRetType = Info ret,
+                valBindTypeParams = tps,
+                valBindParams = map snd var_params,
+                valBindBody = body,
+                valBindDoc = Nothing,
+                valBindAttrs = mempty,
+                valBindLocation = mempty
+              }
+
+      traceM $ "fun_ts: " <> pretty fun_ts
+      traceM $ "var_params: " <> pretty var_params
+      traceM $ "body: " <> pretty body
+
+      modify $ \senv -> senv {sEnvAutoMapIntrinsics = M.insert f vb (sEnvAutoMapIntrinsics senv)}
+      -- env <- transformValBind vb
+      -- modify (env <>)
+      pure f'
+  | otherwise = pure f
+  where
+    primToType = (Scalar . Prim)
+    primToTypes = map (Scalar . Prim)
+
+    mPrimToType _ (Just pt) = primToType pt
+    mPrimToType tv Nothing = tv
+
+    mkParams :: [StructType] -> MonoM [(Exp, Pat)]
+    mkParams pts =
+      forM pts $ \t -> do
+        x <- newNameFromString "x"
+        pure
+          ( Var (qualName x) (Info $ fromStruct t) mempty,
+            Id x (Info $ fromStruct t) mempty
+          )
+
+    makeRetParamTypes :: VName -> MonoM ([TypeParam], [(Exp, Pat)], StructRetType)
+    makeRetParamTypes fn =
+      case intrinsics M.! fn of
+        IntrinsicMonoFun pts rt -> do
+          var_params <- mkParams $ primToTypes pts
+          pure (mempty, var_params, RetType [] $ primToType rt)
+        IntrinsicOverloadedFun _ pts rt -> do
+          vn <- newNameFromString "t"
+          let tv = Scalar $ TypeVar mempty Nonunique (QualName [] vn) []
+              pts' = map (mPrimToType tv) pts
+              rt' = RetType [] $ toStruct $ mPrimToType tv rt
+          var_params <- mkParams pts'
+          let tps
+                | any isNothing pts = [TypeParamType Unlifted vn mempty]
+                | otherwise = []
+          pure (tps, var_params, rt')
+        IntrinsicPolyFun tps pts ret -> do
+          var_params <- mkParams pts
+          pure (tps, var_params, ret)
+        IntrinsicType {} -> error $ "makeRetParamTypes: " <> pretty f
+        IntrinsicEquality -> do
+          vn <- newNameFromString "t"
+          let tv = Scalar $ TypeVar mempty Nonunique (QualName [] vn) []
+              tp = TypeParamType Unlifted vn mempty
+          var_params <- mkParams [tv, tv]
+          pure ([tp], var_params, RetType [] $ Scalar $ Prim $ Bool)
 
 getLifts :: MonoM Lifts
 getLifts = MonoM $ lift get
@@ -332,48 +436,53 @@ transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
   (pat_sizes, pat') <- sizesForPat pat
   pure $ AppExp (DoLoop (sparams ++ pat_sizes) pat' e1' form' e3' loc) (Info res)
 transformAppExp bop@(BinOp (fname, op_loc) (Info t) (e1, Info (t1, d1, a1)) (e2, Info (t2, d2, a2)) loc) res@(AppRes ret ext)
-  | a1 <> a2 /= mempty = do
-      -- TODO: Do this with a named function, not a lambda
-      x <- newVName "x"
-      y <- newVName "y"
-      f <- newVName "f"
-      let --x_t = fromStruct $ t1
-          --y_t = fromStruct $ t2
-          x_t = fromStruct $ stripArray (shapeRank $ automapShape a1) t1
-          y_t = fromStruct $ stripArray (shapeRank $ automapShape a2) t2
-          params = [Id x (Info x_t) loc, Id y (Info y_t) loc]
-          e1' = Var (qualName x) (Info x_t) loc
-          e2' = Var (qualName y) (Info y_t) loc
-          t1' = Info (stripArray (shapeRank $ automapShape a1) t1, d1, mempty)
-          t2' = Info (stripArray (shapeRank $ automapShape a2) t2, d2, mempty)
-          --lam_e = AppExp (BinOp (fname, op_loc) (Info t) (e1', t1') (e2', t2') loc) (Info (AppRes (stripArray (max (shapeRank $ automapShape a1) (shapeRank $ automapShape a2)) ret) ext))
-          lam_e = AppExp (BinOp (fname, op_loc) (Info t) (e1', t1') (e2', t2') loc) (Info (AppRes (stripArray (max (shapeRank $ automapShape a1) (shapeRank $ automapShape a2)) ret) ext))
-          lam = Lambda params lam_e Nothing (Info (mempty, RetType mempty (toStruct $ snd $ unfoldFunType t))) loc
-          --lam = Lambda params lam_e Nothing (Info (mempty, RetType mempty $ toStruct ret )) loc
-          app1 =
-            AppExp
-              (Apply lam e1 (Info (Observe, Nothing, a1)) loc)
-              (Info $ AppRes (foldFunType [y_t] $ RetType mempty ret) mempty)
-          app2 = Apply app1 e2 (Info (Observe, Nothing, a2)) loc
-      traceM $ "e1: " <> pretty e1
-      traceM $ "t1: " <> pretty t1
-      traceM $ "params: " <> pretty params
-      traceM $ "lam_e: " <> pretty lam_e
-      traceM $ "lam: " <> pretty lam
-      traceM $ "app1: " <> pretty app1
+  -- TODO: Do this with a named function, not a lambda
+  -- x <- newVName "x"
+  -- y <- newVName "y"
+  -- f <- newVName "f"
+  -- let --x_t = fromStruct $ t1
+  --    --y_t = fromStruct $ t2
+  --    x_t = fromStruct $ stripArray (shapeRank $ automapShape a1) t1
+  --    y_t = fromStruct $ stripArray (shapeRank $ automapShape a2) t2
+  --    params = [Id x (Info x_t) loc, Id y (Info y_t) loc]
+  --    e1' = Var (qualName x) (Info x_t) loc
+  --    e2' = Var (qualName y) (Info y_t) loc
+  --    t1' = Info (stripArray (shapeRank $ automapShape a1) t1, d1, mempty)
+  --    t2' = Info (stripArray (shapeRank $ automapShape a2) t2, d2, mempty)
+  --    --lam_e = AppExp (BinOp (fname, op_loc) (Info t) (e1', t1') (e2', t2') loc) (Info (AppRes (stripArray (max (shapeRank $ automapShape a1) (shapeRank $ automapShape a2)) ret) ext))
+  --    lam_e = AppExp (BinOp (fname, op_loc) (Info t) (e1', t1') (e2', t2') loc) (Info (AppRes (stripArray (max (shapeRank $ automapShape a1) (shapeRank $ automapShape a2)) ret) ext))
+  --    lam = Lambda params lam_e Nothing (Info (mempty, RetType mempty (toStruct $ snd $ unfoldFunType t))) loc
+  --    --lam = Lambda params lam_e Nothing (Info (mempty, RetType mempty $ toStruct ret )) loc
+  --    app1 =
+  --      AppExp
+  --        (Apply lam e1 (Info (Observe, Nothing, a1)) loc)
+  --        (Info $ AppRes (foldFunType [y_t] $ RetType mempty ret) mempty)
+  --    app2 = Apply app1 e2 (Info (Observe, Nothing, a2)) loc
+  -- traceM $ "e1: " <> pretty e1
+  -- traceM $ "t1: " <> pretty t1
+  -- traceM $ "params: " <> pretty params
+  -- traceM $ "lam_e: " <> pretty lam_e
+  -- traceM $ "lam: " <> pretty lam
+  -- traceM $ "app1: " <> pretty app1
+  -- traceM $ "app2: " <> pretty app2
+  -- traceM $ "app2: " <> show app2
+  -- traceM $ "res: " <>  show res
+  -- transformAppExp app2 res
+  | otherwise = do
       traceM $ "am1: " <> show a1
       traceM $ "am2: " <> show a2
       traceM $ "bop: " <> pretty bop
-      traceM $ "app2: " <> pretty app2
-      traceM $ "app2: " <> show app2
-      traceM $ "res: " <> show res
-      transformAppExp app2 res
-  | otherwise = do
-      fname' <- transformFName loc fname $ toStruct t
+      traceM $ "bop: " <> show bop
+      -- fname' <-
+      --  if a1 <> a2 /= mempty
+      --    then lookupAutoMapIntrinsic fname
+      --    else pure (qualLeaf fname)
+      let fname' = qualLeaf fname
+      fname'' <- transformFName loc (QualName [] fname') $ toStruct t
       e1' <- transformExp e1
       e2' <- transformExp e2
       if orderZero (typeOf e1') && orderZero (typeOf e2')
-        then pure $ applyOp fname' e1' e2'
+        then pure $ applyOp fname'' e1' e2'
         else do
           -- We have to flip the arguments to the function, because
           -- operator application is left-to-right, while function
@@ -393,7 +502,7 @@ transformAppExp bop@(BinOp (fname, op_loc) (Info t) (e1, Info (t1, d1, a1)) (e2,
                   x_param
                   e1'
                   ( AppExp
-                      (LetPat [] y_param e2' (applyOp fname' x_param_e y_param_e) loc)
+                      (LetPat [] y_param e2' (applyOp fname'' x_param_e y_param_e) loc)
                       (Info $ AppRes ret mempty)
                   )
                   mempty
@@ -994,6 +1103,10 @@ transformTypeBind (TypeBind name l tparams _ (Info (RetType dims t)) _ _) = do
 
 transformDecs :: [Dec] -> MonoM ()
 transformDecs [] = pure ()
+-- transformDecs [] = do
+--  vbs <- M.elems <$> gets sEnvAutoMapIntrinsics
+--  traceM $ "vbs: " <> pretty vbs
+--  transformDecs $ map ValDec vbs
 transformDecs (ValDec valbind : ds) = do
   env <- transformValBind valbind
   localEnv env $ transformDecs ds
@@ -1006,10 +1119,26 @@ transformDecs (dec : _) =
       ++ "input program, but received: "
       ++ pretty dec
 
+transformAutoMapIntrinsics :: MonoM ()
+transformAutoMapIntrinsics = do
+  vbs <- M.elems <$> gets sEnvAutoMapIntrinsics
+  traceM $ "vbs: " <> pretty vbs
+  transformDecs $ map ValDec vbs
+
 -- | Monomorphise a list of top-level declarations. A module-free input program
 -- is expected, so only value declarations and type declaration are accepted.
+-- transformProg :: MonadFreshNames m => [Dec] -> m [ValBind]
+-- transformProg decs = do
+--  vbs_done <- fmap (toList . fmap snd . snd) $
+--    modifyNameSource $ \namesrc ->
+--      (second sEnvNameSource) $ runMonoM (SEnv namesrc mempty) $
+--        transformDecs decs >> transformAutoMapIntrinsics
+--  traceM $  "vbs_done: " <> pretty vbs_done
+--  pure vbs_done
 transformProg :: MonadFreshNames m => [Dec] -> m [ValBind]
-transformProg decs =
+transformProg decs = do
   fmap (toList . fmap snd . snd) $
     modifyNameSource $ \namesrc ->
-      runMonoM namesrc $ transformDecs decs
+      (second sEnvNameSource) $
+        runMonoM (SEnv namesrc mempty) $
+          transformDecs decs

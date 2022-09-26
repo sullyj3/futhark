@@ -54,7 +54,6 @@ module Language.Futhark.Prop
     unfoldFunType,
     foldFunType,
     typeVars,
-    rankDiff,
     automapRank,
 
     -- * Operations on types
@@ -605,10 +604,6 @@ typeVars t =
   where
     typeArgFree (TypeArgType ta _) = typeVars ta
     typeArgFree TypeArgDim {} = mempty
-
--- | The rank difference between two types.
-rankDiff :: TypeBase dim as -> TypeBase dim as -> Int
-rankDiff t1 t2 = undefined
 
 automapRank :: AutoMapBase dim -> Int
 automapRank = length . automapShape

@@ -260,6 +260,7 @@ library
       Futhark.Internalise.Monad
       Futhark.Internalise.Monomorphise
       Futhark.Internalise.TypesValues
+      Futhark.Internalise.Automap
       Futhark.LSP.Compile
       Futhark.LSP.Diagnostic
       Futhark.LSP.Handlers

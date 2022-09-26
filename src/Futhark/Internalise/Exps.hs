@@ -75,12 +75,11 @@ internaliseValBind fb@(E.ValBind entry fname retdecl (Info rettype) tparams para
 
     attrs' <- internaliseAttrs attrs
 
-    
     traceM $ "fname: " <> pretty fname
     traceM $ "rettype: " <> pretty rettype
     traceM $ "rettype': " <> pretty rettype'
     traceM $ "all_params: " <> pretty all_params
-    
+
     let fd =
           I.FunDef
             Nothing
@@ -2141,7 +2140,7 @@ funcall desc qfname@(QualName _ fname) args loc = do
   (ses, ts) <- expand args argts ds (maximum ds)
   traceM $ "fix_rettype: " <> pretty (fix_rettype ts ds (maximum ds) argts)
   traceM $ "fix_rettype': " <> pretty (fix_rettype ts ds (maximum ds) argts')
-  traceM $ "ts : "<> pretty ts
+  traceM $ "ts : " <> pretty ts
   traceM $ "args: " <> pretty args
   traceM $ "argts: " <> pretty argts
   pure (ses, fix_rettype ts ds (maximum ds) argts')
