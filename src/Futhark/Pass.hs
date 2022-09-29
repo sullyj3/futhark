@@ -1,5 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE Strict #-}
 
 -- | Definition of a polymorphic (generic) pass that can work with
@@ -36,13 +34,14 @@ instance MonadFreshNames PassM where
   getNameSource = PassM get
 
 -- | Execute a 'PassM' action, yielding logging information and either
--- an error text or a result.
+-- an error pretty or a result.
 runPassM ::
   MonadFreshNames m =>
   PassM a ->
   m (a, Log)
 runPassM (PassM m) = modifyNameSource $ runState (runWriterT m)
 
+-- | A compiler pass transforming a 'Prog' of a given rep to a 'Prog'
 -- of another rep.
 data Pass fromrep torep = Pass
   { -- | Name of the pass.  Keep this short and simple.  It will
@@ -50,7 +49,7 @@ data Pass fromrep torep = Pass
     -- name via 'passLongOption'.
     passName :: String,
     -- | A slightly longer description, which will show up in the
-    -- command-line help text.
+    -- command-line help pretty.
     passDescription :: String,
     passFunction :: Prog fromrep -> PassM (Prog torep)
   }

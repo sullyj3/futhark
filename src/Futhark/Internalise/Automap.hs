@@ -4,7 +4,7 @@
 module Futhark.Internalise.Automap (transformProg) where
 
 import Control.Monad.State
-import qualified Data.Map.Strict as M
+import Data.Map.Strict qualified as M
 import Data.Maybe
 import Debug.Trace
 import Futhark.MonadFreshNames
@@ -43,7 +43,7 @@ transformExp :: Exp -> AutoMapM Exp
 transformExp (AppExp bop@(BinOp (fname, op_loc) (Info t) (e1, Info (t1, d1, a1)) (e2, Info (t2, d2, a2)) loc) (Info (res@(AppRes ret ext)))) = do
   traceM $ "am1: " <> show a1
   traceM $ "am2: " <> show a2
-  traceM $ "bop: " <> pretty bop
+  traceM $ "bop: " <> prettyString bop
   traceM $ "bop: " <> show bop
   fname' <-
     if a1 <> a2 /= mempty
@@ -97,9 +97,9 @@ removeIntrinsicFun f
                 valBindLocation = mempty
               }
 
-      traceM $ "fun_ts: " <> pretty fun_ts
-      traceM $ "var_params: " <> pretty var_params
-      traceM $ "body: " <> pretty body
+      traceM $ "fun_ts: " <> prettyString fun_ts
+      traceM $ "var_params: " <> prettyString var_params
+      traceM $ "body: " <> prettyString body
 
       modify $ \senv -> senv {sEnvAutoMapIntrinsics = M.insert f vb (sEnvAutoMapIntrinsics senv)}
       -- env <- transformValBind vb
@@ -141,7 +141,7 @@ removeIntrinsicFun f
         IntrinsicPolyFun tps pts ret -> do
           var_params <- mkParams pts
           pure (tps, var_params, ret)
-        IntrinsicType {} -> error $ "makeRetParamTypes: " <> pretty f
+        IntrinsicType {} -> error $ "makeRetParamTypes: " <> show f
         IntrinsicEquality -> do
           vn <- newNameFromString "t"
           let tv = Scalar $ TypeVar mempty Nonunique (QualName [] vn) []

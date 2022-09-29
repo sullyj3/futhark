@@ -1,8 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE Trustworthy #-}
-
 -- | This monomorphization module converts a well-typed, polymorphic,
 -- module-free Futhark program into an equivalent monomorphic program.
 --
@@ -37,10 +32,10 @@ import Data.Bifunctor
 import Data.Bitraversable
 import Data.Foldable
 import Data.List (partition, tails, zip4)
-import qualified Data.Map.Strict as M
+import Data.Map.Strict qualified as M
 import Data.Maybe
-import qualified Data.Sequence as Seq
-import qualified Data.Set as S
+import Data.Sequence qualified as Seq
+import Data.Set qualified as S
 import Debug.Trace
 import Futhark.MonadFreshNames
 import Futhark.Util.Pretty
@@ -173,11 +168,11 @@ instance Eq MonoSize where
   _ == _ = False
 
 instance Pretty MonoSize where
-  ppr (MonoKnown i) = text "?" <> ppr i
-  ppr (MonoAnon v) = text "?" <> pprName v
+  pretty (MonoKnown i) = "?" <> pretty i
+  pretty (MonoAnon v) = "?" <> prettyName v
 
 instance Pretty (Shape MonoSize) where
-  ppr (Shape ds) = mconcat (map (brackets . ppr) ds)
+  pretty (Shape ds) = mconcat (map (brackets . pretty) ds)
 
 -- The kind of type relative to which we monomorphise.  What is most
 -- important to us is not the specific dimensions, but merely whether
@@ -239,9 +234,9 @@ removeIntrinsicFun f
                 valBindLocation = mempty
               }
 
-      traceM $ "fun_ts: " <> pretty fun_ts
-      traceM $ "var_params: " <> pretty var_params
-      traceM $ "body: " <> pretty body
+      traceM $ "fun_ts: " <> prettyString fun_ts
+      traceM $ "var_params: " <> prettyString var_params
+      traceM $ "body: " <> prettyString body
 
       modify $ \senv -> senv {sEnvAutoMapIntrinsics = M.insert f vb (sEnvAutoMapIntrinsics senv)}
       -- env <- transformValBind vb
@@ -283,7 +278,7 @@ removeIntrinsicFun f
         IntrinsicPolyFun tps pts ret -> do
           var_params <- mkParams pts
           pure (tps, var_params, ret)
-        IntrinsicType {} -> error $ "makeRetParamTypes: " <> pretty f
+        IntrinsicType {} -> error $ "makeRetParamTypes: " <> show f
         IntrinsicEquality -> do
           vn <- newNameFromString "t"
           let tv = Scalar $ TypeVar mempty Nonunique (QualName [] vn) []
@@ -421,7 +416,7 @@ transformAppExp (LetFun fname (tparams, params, retdecl, Info ret, body) e loc) 
 transformAppExp (If e1 e2 e3 loc) res =
   AppExp <$> (If <$> transformExp e1 <*> transformExp e2 <*> transformExp e3 <*> pure loc) <*> pure (Info res)
 transformAppExp e@(Apply e1 e2 d loc) res = do
-  traceM $ "transformAppExpApply: " <> pretty (Apply e1 e2 d loc)
+  traceM $ "transformAppExpApply: " <> prettyString (Apply e1 e2 d loc)
   AppExp <$> (Apply <$> transformExp e1 <*> transformExp e2 <*> pure d <*> pure loc) <*> pure (Info res)
 transformAppExp (DoLoop sparams pat e1 form e3 loc) res = do
   e1' <- transformExp e1
@@ -458,20 +453,20 @@ transformAppExp bop@(BinOp (fname, op_loc) (Info t) (e1, Info (t1, d1, a1)) (e2,
   --        (Apply lam e1 (Info (Observe, Nothing, a1)) loc)
   --        (Info $ AppRes (foldFunType [y_t] $ RetType mempty ret) mempty)
   --    app2 = Apply app1 e2 (Info (Observe, Nothing, a2)) loc
-  -- traceM $ "e1: " <> pretty e1
-  -- traceM $ "t1: " <> pretty t1
-  -- traceM $ "params: " <> pretty params
-  -- traceM $ "lam_e: " <> pretty lam_e
-  -- traceM $ "lam: " <> pretty lam
-  -- traceM $ "app1: " <> pretty app1
-  -- traceM $ "app2: " <> pretty app2
+  -- traceM $ "e1: " <> prettyString e1
+  -- traceM $ "t1: " <> prettyString t1
+  -- traceM $ "params: " <> prettyString params
+  -- traceM $ "lam_e: " <> prettyString lam_e
+  -- traceM $ "lam: " <> prettyString lam
+  -- traceM $ "app1: " <> prettyString app1
+  -- traceM $ "app2: " <> prettyString app2
   -- traceM $ "app2: " <> show app2
   -- traceM $ "res: " <>  show res
   -- transformAppExp app2 res
   | otherwise = do
       traceM $ "am1: " <> show a1
       traceM $ "am2: " <> show a2
-      traceM $ "bop: " <> pretty bop
+      traceM $ "bop: " <> prettyString bop
       traceM $ "bop: " <> show bop
       -- fname' <-
       --  if a1 <> a2 /= mempty
@@ -753,10 +748,10 @@ desugarProjectSection fields (Scalar (Arrow _ _ t1 (RetType dims t2))) loc = do
         t ->
           error $
             "desugarOpSection: type "
-              ++ pretty t
+              ++ prettyString t
               ++ " does not have field "
-              ++ pretty field
-desugarProjectSection _ t _ = error $ "desugarOpSection: not a function type: " ++ pretty t
+              ++ prettyString field
+desugarProjectSection _ t _ = error $ "desugarOpSection: not a function type: " ++ prettyString t
 
 desugarIndexSection :: [DimIndex] -> PatType -> SrcLoc -> MonoM Exp
 desugarIndexSection idxs (Scalar (Arrow _ _ t1 (RetType dims t2))) loc = do
@@ -771,7 +766,7 @@ desugarIndexSection idxs (Scalar (Arrow _ _ t1 (RetType dims t2))) loc = do
       loc
   where
     t1' = fromStruct t1
-desugarIndexSection _ t _ = error $ "desugarIndexSection: not a function type: " ++ pretty t
+desugarIndexSection _ t _ = error $ "desugarIndexSection: not a function type: " ++ prettyString t
 
 noticeDims :: TypeBase Size as -> MonoM ()
 noticeDims = mapM_ notice . freeInType
@@ -1002,7 +997,7 @@ typeSubstsM loc orig_t1 orig_t2 =
         typeSubstClause (_, ts1) (_, ts2) = zipWithM sub ts1 ts2
     sub t1@(Scalar Sum {}) t2 = sub t1 t2
     sub t1 t2@(Scalar Sum {}) = sub t1 t2
-    sub t1 t2 = error $ unlines ["typeSubstsM: mismatched types:", pretty t1, pretty t2]
+    sub t1 t2 = error $ unlines ["typeSubstsM: mismatched types:", prettyString t1, prettyString t2]
 
     addSubst (QualName _ v) (RetType ext t) = do
       (ts, sizes) <- get
@@ -1099,7 +1094,7 @@ transformValBind valbind = do
           $ unInfo
           $ valBindRetType valbind
       (name, infer, valbind'') <- monomorphiseBinding True valbind' $ monoType t
-      traceM $ "valbind'': " <> pretty valbind''
+      traceM $ "valbind'': " <> prettyString valbind''
       entry' <- transformEntryPoint entry
       tell $ Seq.singleton (name, valbind'' {valBindEntryPoint = Just $ Info entry'})
       addLifted (valBindName valbind) (monoType t) (name, infer)
@@ -1117,7 +1112,7 @@ transformDecs :: [Dec] -> MonoM ()
 transformDecs [] = pure ()
 -- transformDecs [] = do
 --  vbs <- M.elems <$> gets sEnvAutoMapIntrinsics
---  traceM $ "vbs: " <> pretty vbs
+--  traceM $ "vbs: " <> prettyString vbs
 --  transformDecs $ map ValDec vbs
 transformDecs (ValDec valbind : ds) = do
   env <- transformValBind valbind
@@ -1129,12 +1124,12 @@ transformDecs (dec : _) =
   error $
     "The monomorphization module expects a module-free "
       ++ "input program, but received: "
-      ++ pretty dec
+      ++ prettyString dec
 
 transformAutoMapIntrinsics :: MonoM ()
 transformAutoMapIntrinsics = do
   vbs <- M.elems <$> gets sEnvAutoMapIntrinsics
-  traceM $ "vbs: " <> pretty vbs
+  traceM $ "vbs: " <> prettyString vbs
   transformDecs $ map ValDec vbs
 
 -- | Monomorphise a list of top-level declarations. A module-free input program
@@ -1145,7 +1140,7 @@ transformAutoMapIntrinsics = do
 --    modifyNameSource $ \namesrc ->
 --      (second sEnvNameSource) $ runMonoM (SEnv namesrc mempty) $
 --        transformDecs decs >> transformAutoMapIntrinsics
---  traceM $  "vbs_done: " <> pretty vbs_done
+--  traceM $  "vbs_done: " <> prettyString vbs_done
 --  pure vbs_done
 transformProg :: MonadFreshNames m => [Dec] -> m [ValBind]
 transformProg decs = do

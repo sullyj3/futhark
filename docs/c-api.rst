@@ -345,6 +345,55 @@ see :c:func:`futhark_restore_opaque_foo`).
    Futhark program, and compiled with the same version of the Futhark
    compiler.
 
+Records
+~~~~~~~
+
+A record is an opaque type (see above) that supports additional
+functions to *project* individual fields (read their values) to
+construct a value given values for the fields.  An opaque type is a
+record if its definition is a record at the Futhark level.
+
+The projection and construction functions are equivalent in
+functionality to writing entry points by hand, and so serve only to
+cut down on boilerplate.  Important things to be aware of:
+
+1. The objects constructed though these functions have their own
+   lifetime (like any objects returned from an entry point) and must
+   be manually freed, independently of the records from which they are
+   projected, or the fields they are constructed from.
+
+2. The objects are however in an *aliasing* relationship with the
+   fields or original record.  This means you must be careful when
+   passing them to entry points that consume their arguments.  As
+   always, you don't have to worry about this if you never write entry
+   points that consume their arguments.
+
+The precise functions generated depend on the fields of the record.
+The following functions assume a record with Futhark-level type ``type
+t = {foo: t1, bar: t2}`` where ``t1`` and ``t2`` are also opaque
+types.
+
+.. c:function:: int futhark_new_opaque_t(struct futhark_context *ctx, struct futhark_opaque_t **out, const struct futhark_opaque_t2 *bar, const struct futhark_opaque_t1 *foo);
+
+   Construct a record in ``*out`` which has the given values for the
+   ``bar`` and ``foo`` fields.  The parameter ordering constitutes the
+   fields in alphabetic order.  Tuple fields are named ``vX`` where
+   ``X`` is an integer.  The resulting record *aliases* the values
+   provided for ``bar`` and ``foo``, but has its own lifetime, and all
+   values must be individually freed when they are no longer needed.
+
+.. c:function:: int futhark_project_opaque_t_bar(struct futhark_context *ctx, struct futhark_opaque_t2 **out, const struct futhark_opaque_t *obj);
+
+   Extract the value of the field ``bar`` from the provided record.
+   The resulting value *aliases* the record, but has its own lifetime,
+   and must eventually be freed.
+
+.. c:function:: int futhark_project_opaque_t_foo(struct futhark_context *ctx, struct futhark_opaque_t1 **out, const struct futhark_opaque_t *obj);
+
+   Extract the value of the field ``bar`` from the provided record.
+   The resulting value *aliases* the record, but has its own lifetime,
+   and must eventually be freed.
+
 Entry points
 ------------
 
@@ -558,16 +607,18 @@ the manifest contains:
 
   * The C function name of the entry point.
 
-  * A list of all *inputs*, including their type and whether they are
-    *unique* (consuming).
+  * A list of all *inputs*, including their type (as a name) and
+    *whether they are unique* (consuming).
 
-  * A list of all *outputs*, including their type and whether they are
-    *unique*.
+  * A list of all *outputs*, including their type (as a name) and
+    *whether they are unique*.
 
 * A mapping from the name of each non-scalar type to:
 
-  * The C type of used to represent the type (which is in practice
+  * The C type used to represent this type (which is in practice
     always a pointer of some kind).
+
+  * What *kind* of type this is - either an *array* or an *opaque*.
 
   * For arrays, the element type and rank.
 
@@ -579,6 +630,15 @@ the manifest contains:
     * For arrays: ``free``, ``shape``, ``values``, ``new``.
 
     * For opaques: ``free``, ``store``, ``restore``.
+
+  * For opaques that are actually records (including tuples):
+
+    * The list of fields, including their type and a projection
+      function.  The field ordering here is the one used expected by
+      the *new* function.
+
+    * The name of the C *new* function for creating a record from
+      field values.
 
 Manifests are defined by the following JSON Schema:
 

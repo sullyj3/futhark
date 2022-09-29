@@ -1,5 +1,3 @@
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- | The code generator cannot handle the array combinators (@map@ and
@@ -21,9 +19,9 @@ where
 import Control.Monad.Except
 import Control.Monad.State
 import Data.List (find, zip4)
-import qualified Data.Map.Strict as M
-import qualified Futhark.Analysis.Alias as Alias
-import qualified Futhark.IR as AST
+import Data.Map.Strict qualified as M
+import Futhark.Analysis.Alias qualified as Alias
+import Futhark.IR qualified as AST
 import Futhark.IR.Prop.Aliases
 import Futhark.IR.SOACS
 import Futhark.MonadFreshNames
@@ -230,7 +228,7 @@ transformSOAC pat (Screma w arrs form@(ScremaForm scans reds map_lam)) = do
     (++ patNames pat)
       <$> replicateM (length scanacc_params) (newVName "discard")
   letBindNames names $ DoLoop merge loopform loop_body
-transformSOAC pat (Stream w arrs _ nes lam) = do
+transformSOAC pat (Stream w arrs nes lam) = do
   -- Create a loop that repeatedly applies the lambda body to a
   -- chunksize of 1.  Hopefully this will lead to this outer loop
   -- being the only one, as all the innermost one can be simplified
@@ -263,10 +261,8 @@ transformSOAC pat (Stream w arrs _ nes lam) = do
 
   let loop_form = ForLoop i Int64 w []
 
-  letBindNames [paramName chunk_size_param] $
-    BasicOp $
-      SubExp $
-        intConst Int64 1
+  letBindNames [paramName chunk_size_param] . BasicOp . SubExp $
+    intConst Int64 1
 
   loop_body <- runBodyBuilder $
     localScope (scopeOf loop_form <> scopeOfFParams merge_params) $ do
@@ -277,11 +273,13 @@ transformSOAC pat (Stream w arrs _ nes lam) = do
 
       (res, mapout_res) <- splitAt (length nes) <$> bodyBind (lambdaBody lam)
 
+      res' <- mapM (copyIfArray . resSubExp) res
+
       mapout_res' <- forM (zip mapout_params mapout_res) $ \(p, SubExpRes cs se) ->
         certifying cs . letSubExp "mapout_res" . BasicOp $
           Update Unsafe (paramName p) (fullSlice (paramType p) slice) se
 
-      mkBodyM mempty $ res ++ subExpsRes mapout_res'
+      mkBodyM mempty $ subExpsRes $ res' ++ mapout_res'
 
   letBind pat $ DoLoop merge loop_form loop_body
 transformSOAC pat (Scatter len ivs lam as) = do

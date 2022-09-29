@@ -2,17 +2,22 @@
 
 The Futhark compiler is a significant body of code with a not entirely
 straightforward design. The main source of documentation is the
-Haddock comments in the source code itself.  You can generate
-hyperlinked reference documentation by running `make docs` (see
-below).  To build the compiler, you need a recent version of
+Haddock comments in the source code itself.
+
+To build the compiler, you need a recent version of
 [GHC](http://ghc.haskell.org/), which can be installed via
-[ghcup](https://www.haskell.org/ghcup/).
+[ghcup](https://www.haskell.org/ghcup/).  Alternatively, if you
+[install Nix](https://nixos.org/download.html#download-nix) then you
+can run `nix-shell` to get a shell environment in which all necessary
+tools are installed.
 
-If you [install Nix](https://nixos.org/download.html#download-nix)
-then you can run `nix-shell` to get a shell environment in which all
-necessary tools are installed.
+After that, run `make docs` to generate internal compiler
+documentation in HTML format.  The last few lines of output will tell
+you the name of an `index.html` file which you should then open.  Go
+to the documentation for the module named `Futhark`, which contains an
+introduction to the compiler architecture.
 
-Make sure to see the [Haskell style guide](STYLE.md).
+For contributing code, see the [Haskell style guide](STYLE.md).
 
 If you feel that the documentation is incomplete, or something lacks
 an explanation, then feel free to [report it as an
@@ -144,3 +149,34 @@ will write an `.s` file that contains what appears to be HSA assembly
 (at least when using ROCm). If you find yourself having to do do this,
 then you are definitely going to have a bad day, and probably evening
 and night as well.
+
+## Minimising programs
+
+Sometimes you have a program that produces the wrong results rather
+than crashing the compiler.  These are some of the most difficult bugs
+to handle.  If the result is at least deterministic and you have some
+way of compiling the program that does work (either an older version
+or a different backend), then the following procedure is useful for
+reducing the program as much as possible.  Suppose that we are trying
+to debug a miscompilation for the `opencl` backend where the `c`
+backend works, the failing program is `prog.fut`, and the input data
+is `prog.in`.  Write the following script `test.sh`:
+
+```
+set -x
+set -e
+futhark c prog.fut -o prog-c
+futhark opencl prog.fut -o prog-opencl
+cat prog.in | ./prog-new -b > output-c
+cat prog.in | ./prog-old -b > output-opencl
+futhark datacmp output-c output-opencl
+```
+
+This compares the results obtained from running the program with the
+two compilers.  You can now (manually) start removing parts of
+`prog.fut` while regularly rerunning `test.sh` to verify that it still
+fails.  In particular, you can easily remove program return values,
+which is not the case if you are comparing against a fixed expected
+output. Eventually you will have a hopefully small program that
+produces different results with the two compilers, and you can look in
+detail at the IR to figure out what goes wrong.

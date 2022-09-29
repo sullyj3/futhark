@@ -5,7 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
-## [0.22.0]
+## [0.23.0]
+
+### Added
+
+### Removed
+
+### Changed
+
+### Fixed
+
+* Non-server executables neglected to synchronise before printing results (#1731).
+
+## [0.22.2]
+
+### Added
+
+* `futhark repl` is now delightfully more colourful.
+
+* `futhark repl` no longer prints scalar types with type suffixes (#1724).
+
+* `futhark pyopencl` executables now accept ``--build-option``.
+
+* New functions: `f16.nextafter`, `f32.nextafter`, `f64.nextafter`,
+  matching the ones in the C math library.
+
+* `futhark literate` now prints directives in the output exactly as
+  they appear in the source.
+
+### Fixed
+
+* Diagnostics will no longer contain control codes when output is a
+  file.
+
+* CLI executables now fail when printing an opaque instead of
+  producing garbage.  This improves handling of some incorrect uses of
+  `auto output` (#1251).
+
+## [0.22.1]
+
+### Removed
+
+* Removed prelude functions `reduce_stream`, `map_stream`,
+  `reduce_stream_per`, and `reduce_map_per`.
+
+### Fixed
+
+* Various fixes to scalar migration (#1721).
+
+## [0.21.15]
+
+### Fixed
+
+* Corrupted OOM error messages.
+
+* Excessive internal fragmentation for some programs (#1715).
+
+## [0.21.14]
+
+### Fixed
+
+* `replicate` was broken for sizes that didn't fit in `i32`.
+
+* Transposition of empty arrays in interpreter (#1700).
+
+* Exotic simplification error (#1309).
+
+* Rare race condition could lead to leaking of error message memory in
+  `multicore` and `ispc` backends (#1709).
+
+* Overzealous aliasing for built-in overloaded types (#1711).
+
+## [0.21.13]
 
 ### Added
 
@@ -29,9 +100,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   now have their elements inspected and be created from elements
   (#1568).
 
-### Removed
+* New server protocol commands: `types`, `fields`, `entry_points`.
 
-### Changed
+* Tuples and records can now be passed from FutharkScript to Futhark
+  entry points (#1684).
 
 ### Fixed
 

@@ -1,5 +1,3 @@
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Futhark.Analysis.SymbolTable
@@ -56,13 +54,13 @@ where
 import Control.Arrow ((&&&))
 import Control.Monad
 import Data.List (elemIndex, foldl')
-import qualified Data.Map.Strict as M
+import Data.Map.Strict qualified as M
 import Data.Maybe
 import Data.Ord
 import Futhark.Analysis.PrimExp.Convert
 import Futhark.IR hiding (FParam, lookupType)
-import qualified Futhark.IR as AST
-import qualified Futhark.IR.Prop.Aliases as Aliases
+import Futhark.IR qualified as AST
+import Futhark.IR.Prop.Aliases qualified as Aliases
 import Prelude hiding (elem, lookup)
 
 data SymbolTable rep = SymbolTable
@@ -352,12 +350,13 @@ indexExp table (BasicOp (Replicate (Shape ds) v)) _ is
 indexExp table (BasicOp (Replicate (Shape [_]) (Var v))) _ (_ : is) = do
   guard $ v `available` table
   index' v is table
-indexExp table (BasicOp (Reshape newshape v)) _ is
+indexExp table (BasicOp (Reshape _ newshape v)) _ is
   | Just oldshape <- arrayDims <$> lookupType v table =
+      -- TODO: handle coercions more efficiently.
       let is' =
             reshapeIndex
               (map pe64 oldshape)
-              (map pe64 $ newDims newshape)
+              (map pe64 $ shapeDims newshape)
               is
        in index' v is' table
 indexExp table (BasicOp (Index v slice)) _ is = do

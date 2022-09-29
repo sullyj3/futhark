@@ -1,7 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -32,17 +28,17 @@ import Data.Either
 import Data.Foldable
 import Data.List (partition, transpose, unzip6, zip6)
 import Data.List.NonEmpty (NonEmpty (..))
-import qualified Data.Map.Strict as M
+import Data.Map.Strict qualified as M
 import Data.Maybe
-import qualified Data.Set as S
+import Data.Set qualified as S
 import Futhark.Analysis.DataDependencies
-import qualified Futhark.Analysis.SymbolTable as ST
-import qualified Futhark.Analysis.UsageTable as UT
+import Futhark.Analysis.SymbolTable qualified as ST
+import Futhark.Analysis.UsageTable qualified as UT
 import Futhark.IR.Prop.Aliases
 import Futhark.IR.SOACS
 import Futhark.MonadFreshNames
-import qualified Futhark.Optimise.Simplify as Simplify
-import qualified Futhark.Optimise.Simplify.Engine as Engine
+import Futhark.Optimise.Simplify qualified as Simplify
+import Futhark.Optimise.Simplify.Engine qualified as Engine
 import Futhark.Optimise.Simplify.Rep
 import Futhark.Optimise.Simplify.Rule
 import Futhark.Optimise.Simplify.Rules
@@ -96,22 +92,12 @@ simplifySOAC (JVP lam arr vec) = do
   arr' <- mapM Engine.simplify arr
   vec' <- mapM Engine.simplify vec
   pure (JVP lam' arr' vec', hoisted)
-simplifySOAC (Stream outerdim arr form nes lam) = do
+simplifySOAC (Stream outerdim arr nes lam) = do
   outerdim' <- Engine.simplify outerdim
-  (form', form_hoisted) <- simplifyStreamForm form
   nes' <- mapM Engine.simplify nes
   arr' <- mapM Engine.simplify arr
   (lam', lam_hoisted) <- Engine.enterLoop $ Engine.simplifyLambda lam
-  pure
-    ( Stream outerdim' arr' form' nes' lam',
-      form_hoisted <> lam_hoisted
-    )
-  where
-    simplifyStreamForm (Parallel o comm lam0) = do
-      (lam0', hoisted) <- Engine.simplifyLambda lam0
-      pure (Parallel o comm lam0', hoisted)
-    simplifyStreamForm Sequential =
-      pure (Sequential, mempty)
+  pure (Stream outerdim' arr' nes' lam', lam_hoisted)
 simplifySOAC (Scatter w ivs lam as) = do
   w' <- Engine.simplify w
   (lam', hoisted) <- Engine.enterLoop $ Engine.simplifyLambda lam
@@ -317,7 +303,7 @@ liftIdentityMapping _ pat aux op
 liftIdentityMapping _ _ _ _ = Skip
 
 liftIdentityStreaming :: BottomUpRuleOp (Wise SOACS)
-liftIdentityStreaming _ (Pat pes) aux (Stream w arrs form nes lam)
+liftIdentityStreaming _ (Pat pes) aux (Stream w arrs nes lam)
   | (variant_map, invariant_map) <-
       partitionEithers $ map isInvariantRes $ zip3 map_ts map_pes map_res,
     not $ null invariant_map = Simplify $ do
@@ -331,10 +317,8 @@ liftIdentityStreaming _ (Pat pes) aux (Stream w arrs form nes lam)
                 lambdaReturnType = fold_ts ++ variant_map_ts
               }
 
-      auxing aux $
-        letBind (Pat $ fold_pes ++ variant_map_pes) $
-          Op $
-            Stream w arrs form nes lam'
+      auxing aux . letBind (Pat $ fold_pes ++ variant_map_pes) . Op $
+        Stream w arrs nes lam'
   where
     num_folds = length nes
     (fold_pes, map_pes) = splitAt num_folds pes
@@ -353,7 +337,7 @@ liftIdentityStreaming _ _ _ _ = Skip
 -- | Remove all arguments to the map that are simply replicates.
 -- These can be turned into free variables instead.
 removeReplicateMapping ::
-  (Aliased rep, Buildable rep, BuilderOps rep, HasSOAC rep) =>
+  (Aliased rep, BuilderOps rep, HasSOAC rep) =>
   TopDownRuleOp rep
 removeReplicateMapping vtable pat aux op
   | Just (Screma w arrs form) <- asSOAC op,
@@ -484,15 +468,12 @@ removeDuplicateMapOutput _ _ _ _ = Skip
 -- Mapping some operations becomes an extension of that operation.
 mapOpToOp :: BottomUpRuleOp (Wise SOACS)
 mapOpToOp (_, used) pat aux1 e
-  | Just (map_pe, cs, w, BasicOp (Reshape newshape reshape_arr), [p], [arr]) <-
+  | Just (map_pe, cs, w, BasicOp (Reshape k newshape reshape_arr), [p], [arr]) <-
       isMapWithOp pat e,
     paramName p == reshape_arr,
     not $ UT.isConsumed (patElemName map_pe) used = Simplify $ do
-      let redim
-            | isJust $ shapeCoercion newshape = DimCoercion w
-            | otherwise = DimNew w
       certifying (stmAuxCerts aux1 <> cs) . letBind pat . BasicOp $
-        Reshape (redim : newshape) arr
+        Reshape k (Shape [w] <> newshape) arr
   | Just (_, cs, _, BasicOp (Concat d (arr :| arrs) dw), ps, outer_arr : outer_arrs) <-
       isMapWithOp pat e,
     (arr : arrs) == map paramName ps =
@@ -628,8 +609,7 @@ fuseConcatScatter vtable pat _ (Scatter _ arrs fun dests)
         y_ws <- mapM sizeOf ys
         guard $ all (x_w ==) y_ws
         pure (x_w, x : ys, cs)
-      Just (BasicOp (Reshape reshape arr), cs) -> do
-        guard $ isJust $ shapeCoercion reshape
+      Just (BasicOp (Reshape ReshapeCoerce _ arr), cs) -> do
         (a, b, cs') <- isConcat arr
         pure (a, b, cs <> cs')
       _ -> Nothing
@@ -684,7 +664,7 @@ simplifyKnownIterationSOAC _ pat _ op
       zipWithM_ bindResult red_pes red_res
       zipWithM_ bindArrayResult map_pes map_res
 simplifyKnownIterationSOAC _ pat _ op
-  | Just (Stream (Constant k) arrs _ nes fold_lam) <- asSOAC op,
+  | Just (Stream (Constant k) arrs nes fold_lam) <- asSOAC op,
     oneIsh k = Simplify $ do
       let (chunk_param, acc_params, slice_params) =
             partitionChunkedFoldParameters (length nes) (lambdaParams fold_lam)
@@ -710,7 +690,7 @@ data ArrayOp
   = ArrayIndexing Certs VName (Slice SubExp)
   | ArrayRearrange Certs VName [Int]
   | ArrayRotate Certs VName [SubExp]
-  | ArrayReshape Certs VName (ShapeChange SubExp)
+  | ArrayReshape Certs VName ReshapeKind Shape
   | ArrayCopy Certs VName
   | -- | Never constructed.
     ArrayVar Certs VName
@@ -720,7 +700,7 @@ arrayOpArr :: ArrayOp -> VName
 arrayOpArr (ArrayIndexing _ arr _) = arr
 arrayOpArr (ArrayRearrange _ arr _) = arr
 arrayOpArr (ArrayRotate _ arr _) = arr
-arrayOpArr (ArrayReshape _ arr _) = arr
+arrayOpArr (ArrayReshape _ arr _ _) = arr
 arrayOpArr (ArrayCopy _ arr) = arr
 arrayOpArr (ArrayVar _ arr) = arr
 
@@ -728,7 +708,7 @@ arrayOpCerts :: ArrayOp -> Certs
 arrayOpCerts (ArrayIndexing cs _ _) = cs
 arrayOpCerts (ArrayRearrange cs _ _) = cs
 arrayOpCerts (ArrayRotate cs _ _) = cs
-arrayOpCerts (ArrayReshape cs _ _) = cs
+arrayOpCerts (ArrayReshape cs _ _ _) = cs
 arrayOpCerts (ArrayCopy cs _) = cs
 arrayOpCerts (ArrayVar cs _) = cs
 
@@ -739,8 +719,8 @@ isArrayOp cs (BasicOp (Rearrange perm arr)) =
   Just $ ArrayRearrange cs arr perm
 isArrayOp cs (BasicOp (Rotate rots arr)) =
   Just $ ArrayRotate cs arr rots
-isArrayOp cs (BasicOp (Reshape new_shape arr)) =
-  Just $ ArrayReshape cs arr new_shape
+isArrayOp cs (BasicOp (Reshape k new_shape arr)) =
+  Just $ ArrayReshape cs arr k new_shape
 isArrayOp cs (BasicOp (Copy arr)) =
   Just $ ArrayCopy cs arr
 isArrayOp _ _ =
@@ -750,7 +730,7 @@ fromArrayOp :: ArrayOp -> (Certs, Exp rep)
 fromArrayOp (ArrayIndexing cs arr slice) = (cs, BasicOp $ Index arr slice)
 fromArrayOp (ArrayRearrange cs arr perm) = (cs, BasicOp $ Rearrange perm arr)
 fromArrayOp (ArrayRotate cs arr rots) = (cs, BasicOp $ Rotate rots arr)
-fromArrayOp (ArrayReshape cs arr new_shape) = (cs, BasicOp $ Reshape new_shape arr)
+fromArrayOp (ArrayReshape cs arr k new_shape) = (cs, BasicOp $ Reshape k new_shape arr)
 fromArrayOp (ArrayCopy cs arr) = (cs, BasicOp $ Copy arr)
 fromArrayOp (ArrayVar cs arr) = (cs, BasicOp $ SubExp $ Var arr)
 
@@ -949,7 +929,7 @@ moveTransformToInput vtable screma_pat aux soac@(Screma w arrs (ScremaForm scan 
     arrayIsMapParam (_, ArrayRotate cs arr rots) =
       arr `elem` map_param_names
         && all (`ST.elem` vtable) (namesToList $ freeIn cs <> freeIn rots)
-    arrayIsMapParam (_, ArrayReshape cs arr new_shape) =
+    arrayIsMapParam (_, ArrayReshape cs arr _ new_shape) =
       arr `elem` map_param_names
         && all (`ST.elem` vtable) (namesToList $ freeIn cs <> freeIn new_shape)
     arrayIsMapParam (_, ArrayCopy cs arr) =
@@ -972,8 +952,8 @@ moveTransformToInput vtable screma_pat aux soac@(Screma w arrs (ScremaForm scan 
                   BasicOp $ Rearrange (0 : map (+ 1) perm) arr
                 ArrayRotate _ _ rots ->
                   BasicOp $ Rotate (intConst Int64 0 : rots) arr
-                ArrayReshape _ _ new_shape ->
-                  BasicOp $ Reshape (DimCoercion w : new_shape) arr
+                ArrayReshape _ _ k new_shape ->
+                  BasicOp $ Reshape k (Shape [w] <> new_shape) arr
                 ArrayCopy {} ->
                   BasicOp $ Copy arr
                 ArrayVar {} ->

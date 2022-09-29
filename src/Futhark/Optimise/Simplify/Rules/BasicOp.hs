@@ -1,6 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-overlapping-patterns -Wno-incomplete-patterns -Wno-incomplete-uni-patterns -Wno-incomplete-record-updates #-}
 
@@ -14,7 +11,7 @@ import Control.Monad
 import Data.List (find, foldl', isSuffixOf, sort)
 import Data.List.NonEmpty (NonEmpty (..))
 import Futhark.Analysis.PrimExp.Convert
-import qualified Futhark.Analysis.SymbolTable as ST
+import Futhark.Analysis.SymbolTable qualified as ST
 import Futhark.Construct
 import Futhark.IR
 import Futhark.IR.Prop.Aliases
@@ -196,9 +193,8 @@ ruleBasicOp vtable pat _ (Update _ dest is se)
       case se of
         Var v | not $ null $ sliceDims is -> do
           v_reshaped <-
-            letExp (baseString v ++ "_reshaped") $
-              BasicOp $
-                Reshape (map DimNew $ arrayDims dest_t) v
+            letExp (baseString v ++ "_reshaped") . BasicOp $
+              Reshape ReshapeArbitrary (arrayShape dest_t) v
           letBind pat $ BasicOp $ Copy v_reshaped
         _ -> letBind pat $ BasicOp $ ArrayLit [se] $ rowType dest_t
 ruleBasicOp vtable pat (StmAux cs1 attrs _) (Update safety1 dest1 is1 (Var v1))
@@ -217,7 +213,7 @@ ruleBasicOp vtable pat _ (CmpOp (CmpEq t) se1 se2)
   where
     simplifyWith (Var v) x
       | Just stm <- ST.lookupStm v vtable,
-        If p tbranch fbranch _ <- stmExp stm,
+        Match [p] [Case [Just (BoolValue True)] tbranch] fbranch _ <- stmExp stm,
         Just (y, z) <-
           returns v (stmPat stm) tbranch fbranch,
         not $ boundInBody tbranch `namesIntersect` freeIn y,
@@ -264,23 +260,20 @@ ruleBasicOp _ pat _ (ArrayLit (se : ses) _)
          in letBind pat $ BasicOp $ Replicate (Shape [n]) se
 ruleBasicOp vtable pat aux (Index idd slice)
   | Just inds <- sliceIndices slice,
-    Just (BasicOp (Reshape newshape idd2), idd_cs) <- ST.lookupExp idd vtable,
+    Just (BasicOp (Reshape k newshape idd2), idd_cs) <- ST.lookupExp idd vtable,
     length newshape == length inds =
       Simplify $
-        case shapeCoercion newshape of
-          Just _ ->
-            certifying idd_cs $
-              auxing aux $
-                letBind pat $
-                  BasicOp $
-                    Index idd2 slice
-          Nothing -> do
+        case k of
+          ReshapeCoerce ->
+            certifying idd_cs . auxing aux . letBind pat . BasicOp $
+              Index idd2 slice
+          ReshapeArbitrary -> do
             -- Linearise indices and map to old index space.
             oldshape <- arrayDims <$> lookupType idd2
             let new_inds =
                   reshapeIndex
                     (map pe64 oldshape)
-                    (map pe64 $ newDims newshape)
+                    (map pe64 $ shapeDims newshape)
                     (map pe64 inds)
             new_inds' <-
               mapM (toSubExp "new_index") new_inds

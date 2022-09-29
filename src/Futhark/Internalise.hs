@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE Strict #-}
 
 -- |
@@ -42,7 +41,7 @@
 --   than in the source language.  See 'Futhark.IR.SOACS.SOAC.SOAC'.
 module Futhark.Internalise (internaliseProg) where
 
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Debug.Trace
 import Futhark.Compiler.Config
 import Futhark.IR.SOACS as I hiding (stmPat)
@@ -50,7 +49,7 @@ import Futhark.Internalise.Automap as Automap
 import Futhark.Internalise.Defunctionalise as Defunctionalise
 import Futhark.Internalise.Defunctorise as Defunctorise
 import Futhark.Internalise.Entry (visibleTypes)
-import qualified Futhark.Internalise.Exps as Exps
+import Futhark.Internalise.Exps qualified as Exps
 import Futhark.Internalise.LiftLambdas as LiftLambdas
 import Futhark.Internalise.Monad as I
 import Futhark.Internalise.Monomorphise as Monomorphise
@@ -68,12 +67,12 @@ internaliseProg config prog = do
   maybeLog "Defunctorising"
   prog_decs <- Defunctorise.transformProg prog
   traceM "prog_decs: \n"
-  traceM $ pretty prog_decs
+  traceM $ prettyString prog_decs
   maybeLog "Automapping"
   prog_decs_am <- Automap.transformProg prog_decs
   traceM "prog_decs_am: \n"
   traceM $ show $ head prog_decs_am
-  traceM $ pretty prog_decs_am
+  traceM $ prettyString prog_decs_am
   maybeLog "Monomorphising"
   prog_decs' <- Monomorphise.transformProg prog_decs_am
   maybeLog "Lifting lambdas"
@@ -81,7 +80,7 @@ internaliseProg config prog = do
   maybeLog "Defunctionalising"
   prog_decs''' <- Defunctionalise.transformProg prog_decs''
   maybeLog "Converting to core IR"
-  traceM $ "prog_decs''':" <> pretty prog_decs'''
+  traceM $ "prog_decs''':" <> prettyString prog_decs'''
   Exps.transformProg (futharkSafe config) (visibleTypes prog) prog_decs'''
   where
     verbose = fst (futharkVerbose config) > NotVerbose

@@ -20,10 +20,16 @@ build:
 	cabal build
 
 install: build
-	install -D $$(cabal -v0 list-bin exe:futhark) $(PREFIX)/bin
+	install -D $$(cabal -v0 list-bin exe:futhark) $(PREFIX)/bin/futhark
 
 docs:
-	cabal haddock --enable-documentation --haddock-options=--quickjump
+	cabal haddock \
+		--enable-documentation \
+		--haddock-html \
+		--haddock-options=--show-all \
+		--haddock-options=--quickjump \
+		--haddock-options=--show-all \
+		--haddock-options=--hyperlinked-source
 
 check:
 	tools/style-check.sh src unittests

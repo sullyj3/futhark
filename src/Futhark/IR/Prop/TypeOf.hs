@@ -1,6 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- | This module provides facilities for obtaining the types of
@@ -37,7 +34,6 @@ where
 
 import Data.List.NonEmpty (NonEmpty (..))
 import Futhark.IR.Prop.Constants
-import Futhark.IR.Prop.Reshape
 import Futhark.IR.Prop.Scope
 import Futhark.IR.Prop.Types
 import Futhark.IR.RetType
@@ -102,14 +98,14 @@ basicOpType (Replicate shape e) =
   pure . flip arrayOfShape shape <$> subExpType e
 basicOpType (Scratch t shape) =
   pure [arrayOf (Prim t) (Shape shape) NoUniqueness]
-basicOpType (Reshape [] e) =
+basicOpType (Reshape _ (Shape []) e) =
   result <$> lookupType e
   where
     result t = [Prim $ elemType t]
-basicOpType (Reshape shape e) =
+basicOpType (Reshape _ shape e) =
   result <$> lookupType e
   where
-    result t = [t `setArrayShape` newShape shape]
+    result t = [t `setArrayShape` shape]
 basicOpType (Rearrange perm e) =
   result <$> lookupType e
   where
@@ -135,7 +131,7 @@ expExtType ::
   Exp rep ->
   m [ExtType]
 expExtType (Apply _ _ rt _) = pure $ map (fromDecl . declExtTypeOf) rt
-expExtType (If _ _ _ rt) = pure $ map extTypeOf $ ifReturns rt
+expExtType (Match _ _ _ rt) = pure $ map extTypeOf $ matchReturns rt
 expExtType (DoLoop merge _ _) =
   pure $ loopExtType $ map fst merge
 expExtType (BasicOp op) = staticShapes <$> basicOpType op

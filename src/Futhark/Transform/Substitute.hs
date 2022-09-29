@@ -1,6 +1,3 @@
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- |
@@ -15,7 +12,7 @@ module Futhark.Transform.Substitute
 where
 
 import Control.Monad.Identity
-import qualified Data.Map.Strict as M
+import Data.Map.Strict qualified as M
 import Futhark.Analysis.PrimExp
 import Futhark.IR.Prop.Names
 import Futhark.IR.Prop.Scope
@@ -182,9 +179,6 @@ instance Substitute Ident where
       { identName = substituteNames substs $ identName v,
         identType = substituteNames substs $ identType v
       }
-
-instance Substitute d => Substitute (DimChange d) where
-  substituteNames substs = fmap $ substituteNames substs
 
 instance Substitute d => Substitute (DimIndex d) where
   substituteNames substs = fmap $ substituteNames substs

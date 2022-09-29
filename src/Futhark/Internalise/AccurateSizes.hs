@@ -1,5 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-
 module Futhark.Internalise.AccurateSizes
   ( argShapes,
     ensureResultShape,
@@ -11,13 +9,13 @@ module Futhark.Internalise.AccurateSizes
 where
 
 import Control.Monad
-import qualified Data.Map.Strict as M
+import Data.Map.Strict qualified as M
 import Data.Maybe
+import Debug.Trace
 import Futhark.Construct
 import Futhark.IR.SOACS
 import Futhark.Internalise.Monad
 import Futhark.Util (takeLast)
-import Debug.Trace
 
 shapeMapping ::
   (HasScope SOACS m, Monad m) =>
@@ -46,11 +44,11 @@ shapeMapping all_params value_arg_types =
 argShapes :: [VName] -> [FParam SOACS] -> [Type] -> InternaliseM [SubExp]
 argShapes shapes all_params valargts = do
   mapping <- shapeMapping all_params valargts
-  traceM $ "mapping: " <> pretty mapping
+  traceM $ "mapping: " <> prettyString (M.toList mapping)
   let addShape name =
         case M.lookup name mapping of
           Just se -> se
-          _ -> error $ "argShapes: " ++ pretty name
+          _ -> error $ "argShapes: " ++ prettyString name
   pure $ map addShape shapes
 
 ensureResultShape ::

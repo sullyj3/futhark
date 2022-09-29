@@ -1,5 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Facilities for determining which names are used in some syntactic
@@ -46,9 +44,9 @@ where
 import Control.Category
 import Control.Monad.State.Strict
 import Data.Foldable
-import qualified Data.IntMap.Strict as IM
-import qualified Data.IntSet as IS
-import qualified Data.Map.Strict as M
+import Data.IntMap.Strict qualified as IM
+import Data.IntSet qualified as IS
+import Data.Map.Strict qualified as M
 import Futhark.IR.Prop.Patterns
 import Futhark.IR.Prop.Scope
 import Futhark.IR.Syntax
@@ -79,7 +77,7 @@ instance Monoid Names where
   mempty = Names mempty
 
 instance Pretty Names where
-  ppr = ppr . namesToList
+  pretty = pretty . namesToList
 
 -- | Does the set of names contain this name?
 nameIn :: VName -> Names -> Bool
@@ -306,6 +304,9 @@ instance
 instance FreeIn (Stm rep) => FreeIn (Stms rep) where
   freeIn' = foldMap freeIn'
 
+instance FreeIn body => FreeIn (Case body) where
+  freeIn' = freeIn' . caseBody
+
 instance FreeIn Names where
   freeIn' = fvNames
 
@@ -356,9 +357,6 @@ instance FreeIn (LParamInfo rep) => FreeIn (LoopForm rep) where
   freeIn' (ForLoop _ _ bound loop_vars) = freeIn' bound <> freeIn' loop_vars
   freeIn' (WhileLoop cond) = freeIn' cond
 
-instance FreeIn d => FreeIn (DimChange d) where
-  freeIn' = Data.Foldable.foldMap freeIn'
-
 instance FreeIn d => FreeIn (DimIndex d) where
   freeIn' = Data.Foldable.foldMap freeIn'
 
@@ -389,8 +387,8 @@ instance FreeIn Attrs where
 instance FreeIn dec => FreeIn (StmAux dec) where
   freeIn' (StmAux cs attrs dec) = freeIn' cs <> freeIn' attrs <> freeIn' dec
 
-instance FreeIn a => FreeIn (IfDec a) where
-  freeIn' (IfDec r _) = freeIn' r
+instance FreeIn a => FreeIn (MatchDec a) where
+  freeIn' (MatchDec r _) = freeIn' r
 
 -- | Either return precomputed free names stored in the attribute, or
 -- the freshly computed names.  Relies on lazy evaluation to avoid the

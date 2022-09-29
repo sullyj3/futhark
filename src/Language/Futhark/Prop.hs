@@ -1,8 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 -- | This module provides various simple ways to query and manipulate
 -- fundamental Futhark terms, such as types and values.  The intent is to
 -- keep "Futhark.Language.Syntax" simple, and put whatever embellishments
@@ -17,7 +12,6 @@ module Language.Futhark.Prop
     namesToPrimTypes,
     qualName,
     qualify,
-    valueType,
     primValueType,
     leadingOperator,
     progImports,
@@ -110,16 +104,16 @@ import Data.Char
 import Data.Foldable
 import Data.List (genericLength, isPrefixOf, sortOn)
 import Data.Loc (Loc (..), posFile)
-import qualified Data.Map.Strict as M
+import Data.Map.Strict qualified as M
 import Data.Maybe
 import Data.Ord
-import qualified Data.Set as S
-import qualified Data.Text as T
+import Data.Set qualified as S
 import Futhark.Util (maxinum)
 import Futhark.Util.Pretty
-import qualified Language.Futhark.Primitive as Primitive
+import Language.Futhark.Primitive qualified as Primitive
 import Language.Futhark.Syntax
 import Language.Futhark.Traversals
+import Language.Futhark.Tuple
 
 -- | The name of the default program entry point (@main@).
 defaultEntryPoint :: Name
@@ -300,35 +294,6 @@ isTupleRecord :: TypeBase dim as -> Maybe [TypeBase dim as]
 isTupleRecord (Scalar (Record fs)) = areTupleFields fs
 isTupleRecord _ = Nothing
 
--- | Does this record map correspond to a tuple?
-areTupleFields :: M.Map Name a -> Maybe [a]
-areTupleFields fs =
-  let fs' = sortFields fs
-   in if and $ zipWith (==) (map fst fs') tupleFieldNames
-        then Just $ map snd fs'
-        else Nothing
-
--- | Construct a record map corresponding to a tuple.
-tupleFields :: [a] -> M.Map Name a
-tupleFields as = M.fromList $ zip tupleFieldNames as
-
--- | Increasing field names for a tuple (starts at 0).
-tupleFieldNames :: [Name]
-tupleFieldNames = map (nameFromString . show) [(0 :: Int) ..]
-
--- | Sort fields by their name; taking care to sort numeric fields by
--- their numeric value.  This ensures that tuples and tuple-like
--- records match.
-sortFields :: M.Map Name a -> [(Name, a)]
-sortFields l = map snd $ sortOn fst $ zip (map (fieldish . fst) l') l'
-  where
-    l' = M.toList l
-    onDigit Nothing _ = Nothing
-    onDigit (Just d) c
-      | isDigit c = Just $ d * 10 + ord c - ord '0'
-      | otherwise = Nothing
-    fieldish s = maybe (Right s) Left $ T.foldl' onDigit (Just 0) $ nameToText s
-
 -- | Sort the constructors of a sum type in some well-defined (but not
 -- otherwise significant) manner.
 sortConstrs :: M.Map Name a -> [(Name, a)]
@@ -482,11 +447,6 @@ primValueType (SignedValue v) = Signed $ intValueType v
 primValueType (UnsignedValue v) = Unsigned $ intValueType v
 primValueType (FloatValue v) = FloatType $ floatValueType v
 primValueType BoolValue {} = Bool
-
--- | The type of the value.
-valueType :: Value -> ValueType
-valueType (PrimValue bv) = Scalar $ Prim $ primValueType bv
-valueType (ArrayValue _ t) = t
 
 -- | The type of an Futhark term.  The aliasing will refer to itself, if
 -- the term is a non-tuple-typed variable.
@@ -699,7 +659,7 @@ patternParam p =
 namesToPrimTypes :: M.Map Name PrimType
 namesToPrimTypes =
   M.fromList
-    [ (nameFromString $ pretty t, t)
+    [ (nameFromString $ prettyString t, t)
       | t <-
           Bool
             : map Signed [minBound .. maxBound]
@@ -952,46 +912,6 @@ intrinsics =
                          ]
                    )
                ),
-               ( "map_stream",
-                 IntrinsicPolyFun
-                   [tp_a, tp_b, sp_n]
-                   [ Scalar (Prim $ Signed Int64) `karr` (arr_ka `arr` arr_kb),
-                     arr_a $ shape [n]
-                   ]
-                   $ RetType []
-                   $ uarr_b
-                   $ shape [n]
-               ),
-               ( "map_stream_per",
-                 IntrinsicPolyFun
-                   [tp_a, tp_b, sp_n]
-                   [ Scalar (Prim $ Signed Int64) `karr` (arr_ka `arr` arr_kb),
-                     arr_a $ shape [n]
-                   ]
-                   $ RetType []
-                   $ uarr_b
-                   $ shape [n]
-               ),
-               ( "reduce_stream",
-                 IntrinsicPolyFun
-                   [tp_a, tp_b, sp_n]
-                   [ Scalar t_b `arr` (Scalar t_b `arr` Scalar t_b),
-                     Scalar (Prim $ Signed Int64) `karr` (arr_ka `arr` Scalar t_b),
-                     arr_a $ shape [n]
-                   ]
-                   $ RetType []
-                   $ Scalar t_b
-               ),
-               ( "reduce_stream_per",
-                 IntrinsicPolyFun
-                   [tp_a, tp_b, sp_n]
-                   [ Scalar t_b `arr` (Scalar t_b `arr` Scalar t_b),
-                     Scalar (Prim $ Signed Int64) `karr` (arr_ka `arr` Scalar t_b),
-                     arr_a $ shape [n]
-                   ]
-                   $ RetType []
-                   $ Scalar t_b
-               ),
                ( "acc_write",
                  IntrinsicPolyFun
                    [sp_k, tp_a]
@@ -1176,8 +1096,6 @@ intrinsics =
 
     arr_ka = Array () Nonunique (Shape [NamedSize $ qualName k]) t_a
     uarr_ka = Array () Unique (Shape [NamedSize $ qualName k]) t_a
-    arr_kb = Array () Nonunique (Shape [NamedSize $ qualName k]) t_b
-    karr x y = Scalar $ Arrow mempty (Named k) x (RetType [] y)
 
     accType t =
       TypeVar () Unique (qualName (fst intrinsicAcc)) [TypeArgType t mempty]
@@ -1187,32 +1105,32 @@ intrinsics =
     primFun (name, (ts, t, _)) =
       (name, IntrinsicMonoFun (map unPrim ts) $ unPrim t)
 
-    unOpFun bop = (pretty bop, IntrinsicMonoFun [t] t)
+    unOpFun bop = (prettyString bop, IntrinsicMonoFun [t] t)
       where
         t = unPrim $ Primitive.unOpType bop
 
-    binOpFun bop = (pretty bop, IntrinsicMonoFun [t, t] t)
+    binOpFun bop = (prettyString bop, IntrinsicMonoFun [t, t] t)
       where
         t = unPrim $ Primitive.binOpType bop
 
-    cmpOpFun bop = (pretty bop, IntrinsicMonoFun [t, t] Bool)
+    cmpOpFun bop = (prettyString bop, IntrinsicMonoFun [t, t] Bool)
       where
         t = unPrim $ Primitive.cmpOpType bop
 
-    convOpFun cop = (pretty cop, IntrinsicMonoFun [unPrim ft] $ unPrim tt)
+    convOpFun cop = (prettyString cop, IntrinsicMonoFun [unPrim ft] $ unPrim tt)
       where
         (ft, tt) = Primitive.convOpType cop
 
-    signFun t = ("sign_" ++ pretty t, IntrinsicMonoFun [Unsigned t] $ Signed t)
+    signFun t = ("sign_" ++ prettyString t, IntrinsicMonoFun [Unsigned t] $ Signed t)
 
-    unsignFun t = ("unsign_" ++ pretty t, IntrinsicMonoFun [Signed t] $ Unsigned t)
+    unsignFun t = ("unsign_" ++ prettyString t, IntrinsicMonoFun [Signed t] $ Unsigned t)
 
     unPrim (Primitive.IntType t) = Signed t
     unPrim (Primitive.FloatType t) = FloatType t
     unPrim Primitive.Bool = Bool
     unPrim Primitive.Unit = Bool
 
-    intrinsicPrim t = (pretty t, IntrinsicType Unlifted [] $ Scalar $ Prim t)
+    intrinsicPrim t = (prettyString t, IntrinsicType Unlifted [] $ Scalar $ Prim t)
 
     anyIntType =
       map Signed [minBound .. maxBound]
@@ -1225,7 +1143,7 @@ intrinsics =
     mkIntrinsicBinOp :: BinOp -> Maybe (String, Intrinsic)
     mkIntrinsicBinOp op = do
       op' <- intrinsicBinOp op
-      pure (pretty op, op')
+      pure (prettyString op, op')
 
     binOp ts = Just $ IntrinsicOverloadedFun ts [Nothing, Nothing] Nothing
     ordering = Just $ IntrinsicOverloadedFun anyPrimType [Nothing, Nothing] (Just Bool)
@@ -1388,7 +1306,7 @@ leadingOperator s =
   maybe Backtick snd $
     find ((`isPrefixOf` s') . fst) $
       sortOn (Down . length . fst) $
-        zip (map pretty operators) operators
+        zip (map prettyString operators) operators
   where
     s' = nameToString s
     operators :: [BinOp]

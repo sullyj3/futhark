@@ -1,8 +1,4 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE Strict #-}
-{-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- | = Definition of the Futhark core language IR
@@ -102,7 +98,8 @@
 -- for what is likely the simplest example.
 module Futhark.IR.Syntax
   ( module Language.Futhark.Core,
-    pretty,
+    prettyString,
+    prettyText,
     module Futhark.IR.Rep,
     module Futhark.IR.Syntax.Core,
 
@@ -132,13 +129,13 @@ module Futhark.IR.Syntax
     CmpOp (..),
     ConvOp (..),
     OpaqueOp (..),
-    DimChange (..),
-    ShapeChange,
+    ReshapeKind (..),
     WithAccInput,
     Exp (..),
+    Case (..),
     LoopForm (..),
-    IfDec (..),
-    IfSort (..),
+    MatchDec (..),
+    MatchSort (..),
     Safety (..),
     Lambda (..),
 
@@ -169,12 +166,12 @@ where
 import Control.Category
 import Data.Foldable
 import Data.List.NonEmpty (NonEmpty (..))
-import qualified Data.Sequence as Seq
-import Data.String
+import Data.Sequence qualified as Seq
+import Data.Text qualified as T
 import Data.Traversable (fmapDefault, foldMapDefault)
 import Futhark.IR.Rep
 import Futhark.IR.Syntax.Core
-import Futhark.Util.Pretty (pretty)
+import Futhark.Util.Pretty (prettyString, prettyText)
 import Language.Futhark.Core
 import Prelude hiding (id, (.))
 
@@ -298,46 +295,20 @@ deriving instance RepTypes rep => Show (Body rep)
 
 deriving instance RepTypes rep => Eq (Body rep)
 
--- | The new dimension in a 'Reshape'-like operation.  This allows us to
--- disambiguate "real" reshapes, that change the actual shape of the
--- array, from type coercions that are just present to make the types
--- work out.  The two constructors are considered equal for purposes of 'Eq'.
-data DimChange d
-  = -- | The new dimension is guaranteed to be numerically
-    -- equal to the old one.
-    DimCoercion d
-  | -- | The new dimension is not necessarily numerically
-    -- equal to the old one.
-    DimNew d
-  deriving (Ord, Show)
-
-instance Eq d => Eq (DimChange d) where
-  DimCoercion x == DimNew y = x == y
-  DimCoercion x == DimCoercion y = x == y
-  DimNew x == DimCoercion y = x == y
-  DimNew x == DimNew y = x == y
-
-instance Functor DimChange where
-  fmap f (DimCoercion d) = DimCoercion $ f d
-  fmap f (DimNew d) = DimNew $ f d
-
-instance Foldable DimChange where
-  foldMap f (DimCoercion d) = f d
-  foldMap f (DimNew d) = f d
-
-instance Traversable DimChange where
-  traverse f (DimCoercion d) = DimCoercion <$> f d
-  traverse f (DimNew d) = DimNew <$> f d
-
--- | A list of 'DimChange's, indicating the new dimensions of an array.
-type ShapeChange d = [DimChange d]
-
 -- | Apart from being Opaque, what else is going on here?
 data OpaqueOp
   = -- | No special operation.
     OpaqueNil
   | -- | Print the argument, prefixed by this string.
-    OpaqueTrace String
+    OpaqueTrace T.Text
+  deriving (Eq, Ord, Show)
+
+-- | Which kind of reshape is this?
+data ReshapeKind
+  = -- | Any kind of reshaping.
+    ReshapeCoerce
+  | -- | New shape is dynamically same as original.
+    ReshapeArbitrary
   deriving (Eq, Ord, Show)
 
 -- | A primitive operation that returns something of known size and
@@ -366,9 +337,7 @@ data BasicOp
   | -- | Turn a boolean into a certificate, halting the program with the
     -- given error message if the boolean is false.
     Assert SubExp (ErrorMsg SubExp) (SrcLoc, [SrcLoc])
-  | -- Primitive array operations
-
-    -- | The certificates for bounds-checking are part of the 'Stm'.
+  | -- | The certificates for bounds-checking are part of the 'Stm'.
     Index VName (Slice SubExp)
   | -- | An in-place update of the given array at the given position.
     -- Consumes the array.  If 'Safe', perform a run-time bounds check
@@ -401,10 +370,8 @@ data BasicOp
     Replicate Shape SubExp
   | -- | Create array of given type and shape, with undefined elements.
     Scratch PrimType [SubExp]
-  | -- Array index space transformation.
-
-    -- | 1st arg is the new shape, 2nd arg is the input array.
-    Reshape (ShapeChange SubExp) VName
+  | -- | 1st arg is the new shape, 2nd arg is the input array.
+    Reshape ReshapeKind Shape VName
   | -- | Permute the dimensions of the input array.  The list
     -- of integers is a list of dimensions (0-indexed), which
     -- must be a permutation of @[0,n-1]@, where @n@ is the
@@ -425,6 +392,22 @@ data BasicOp
 type WithAccInput rep =
   (Shape, [VName], Maybe (Lambda rep, [SubExp]))
 
+-- | A non-default case in a 'Match' statement.  The number of
+-- elements in the pattern must match the number of scrutinees.  A
+-- 'Nothing' value indicates that we don't care about it (i.e. a
+-- wildcard).
+data Case body = Case {casePat :: [Maybe PrimValue], caseBody :: body}
+  deriving (Eq, Ord, Show)
+
+instance Functor Case where
+  fmap = fmapDefault
+
+instance Foldable Case where
+  foldMap = foldMapDefault
+
+instance Traversable Case where
+  traverse f (Case vs b) = Case vs <$> f b
+
 -- | The root Futhark expression type.  The v'Op' constructor contains
 -- a rep-specific operation.  Do-loops, branches and function calls
 -- are special.  Everything else is a simple t'BasicOp'.
@@ -432,7 +415,11 @@ data Exp rep
   = -- | A simple (non-recursive) operation.
     BasicOp BasicOp
   | Apply Name [(SubExp, Diet)] [RetType rep] (Safety, SrcLoc, [SrcLoc])
-  | If SubExp (Body rep) (Body rep) (IfDec (BranchType rep))
+  | -- | A match statement picks a branch by comparing the given
+    -- subexpressions (called the /scrutinee/) with the pattern in
+    -- each of the cases.  If none of the cases match, the /default
+    -- body/ is picked.
+    Match [SubExp] [Case (Body rep)] (Body rep) (MatchDec (BranchType rep))
   | -- | @loop {a} = {v} (for i < n|while b) do b@.
     DoLoop [(FParam rep, SubExp)] (LoopForm rep) (Body rep)
   | -- | Create accumulators backed by the given arrays (which are
@@ -463,29 +450,29 @@ deriving instance RepTypes rep => Show (LoopForm rep)
 deriving instance RepTypes rep => Ord (LoopForm rep)
 
 -- | Data associated with a branch.
-data IfDec rt = IfDec
-  { ifReturns :: [rt],
-    ifSort :: IfSort
+data MatchDec rt = MatchDec
+  { matchReturns :: [rt],
+    matchSort :: MatchSort
   }
   deriving (Eq, Show, Ord)
 
 -- | What kind of branch is this?  This has no semantic meaning, but
 -- provides hints to simplifications.
-data IfSort
+data MatchSort
   = -- | An ordinary branch.
-    IfNormal
+    MatchNormal
   | -- | A branch where the "true" case is what we are
     -- actually interested in, and the "false" case is only
     -- present as a fallback for when the true case cannot
     -- be safely evaluated.  The compiler is permitted to
     -- optimise away the branch if the true case contains
     -- only safe statements.
-    IfFallback
+    MatchFallback
   | -- | Both of these branches are semantically equivalent,
     -- and it is fine to eliminate one if it turns out to
     -- have problems (e.g. contain things we cannot generate
     -- code for).
-    IfEquiv
+    MatchEquiv
   deriving (Eq, Show, Ord)
 
 -- | Anonymous function for use in a SOAC.

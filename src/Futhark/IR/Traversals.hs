@@ -83,7 +83,7 @@ identityMapper =
 -- expression.  Importantly, the mapping does not descend recursively
 -- into subexpressions.  The mapping is done left-to-right.
 mapExpM ::
-  (Applicative m, Monad m) =>
+  Monad m =>
   Mapper frep trep m ->
   Exp frep ->
   m (Exp trep)
@@ -103,12 +103,14 @@ mapExpM tv (BasicOp (ConvOp conv x)) =
   BasicOp <$> (ConvOp conv <$> mapOnSubExp tv x)
 mapExpM tv (BasicOp (UnOp op x)) =
   BasicOp <$> (UnOp op <$> mapOnSubExp tv x)
-mapExpM tv (If c texp fexp (IfDec ts s)) =
-  If
-    <$> mapOnSubExp tv c
-    <*> mapOnBody tv mempty texp
-    <*> mapOnBody tv mempty fexp
-    <*> (IfDec <$> mapM (mapOnBranchType tv) ts <*> pure s)
+mapExpM tv (Match ses cases defbody (MatchDec ts s)) =
+  Match
+    <$> mapM (mapOnSubExp tv) ses
+    <*> mapM mapOnCase cases
+    <*> mapOnBody tv mempty defbody
+    <*> (MatchDec <$> mapM (mapOnBranchType tv) ts <*> pure s)
+  where
+    mapOnCase (Case vs body) = Case vs <$> mapOnBody tv mempty body
 mapExpM tv (Apply fname args ret loc) = do
   args' <- forM args $ \(arg, d) ->
     (,) <$> mapOnSubExp tv arg <*> pure d
@@ -145,10 +147,10 @@ mapExpM tv (BasicOp (Replicate shape vexp)) =
   BasicOp <$> (Replicate <$> mapOnShape tv shape <*> mapOnSubExp tv vexp)
 mapExpM tv (BasicOp (Scratch t shape)) =
   BasicOp <$> (Scratch t <$> mapM (mapOnSubExp tv) shape)
-mapExpM tv (BasicOp (Reshape shape arrexp)) =
+mapExpM tv (BasicOp (Reshape kind shape arrexp)) =
   BasicOp
-    <$> ( Reshape
-            <$> mapM (traverse (mapOnSubExp tv)) shape
+    <$> ( Reshape kind
+            <$> mapM (mapOnSubExp tv) shape
             <*> mapOnVName tv arrexp
         )
 mapExpM tv (BasicOp (Rearrange perm e)) =
@@ -301,10 +303,10 @@ walkExpM tv (BasicOp (ConvOp _ x)) =
   walkOnSubExp tv x
 walkExpM tv (BasicOp (UnOp _ x)) =
   walkOnSubExp tv x
-walkExpM tv (If c texp fexp (IfDec ts _)) = do
-  walkOnSubExp tv c
-  walkOnBody tv mempty texp
-  walkOnBody tv mempty fexp
+walkExpM tv (Match ses cases defbody (MatchDec ts _)) = do
+  mapM_ (walkOnSubExp tv) ses
+  mapM_ (walkOnBody tv mempty . caseBody) cases
+  walkOnBody tv mempty defbody
   mapM_ (walkOnBranchType tv) ts
 walkExpM tv (Apply _ args ret _) =
   mapM_ (walkOnSubExp tv . fst) args >> mapM_ (walkOnRetType tv) ret
@@ -326,8 +328,8 @@ walkExpM tv (BasicOp (Replicate shape vexp)) =
   walkOnShape tv shape >> walkOnSubExp tv vexp
 walkExpM tv (BasicOp (Scratch _ shape)) =
   mapM_ (walkOnSubExp tv) shape
-walkExpM tv (BasicOp (Reshape shape arrexp)) =
-  mapM_ (traverse_ (walkOnSubExp tv)) shape >> walkOnVName tv arrexp
+walkExpM tv (BasicOp (Reshape _ shape arrexp)) =
+  mapM_ (walkOnSubExp tv) shape >> walkOnVName tv arrexp
 walkExpM tv (BasicOp (Rearrange _ e)) =
   walkOnVName tv e
 walkExpM tv (BasicOp (Rotate es e)) =

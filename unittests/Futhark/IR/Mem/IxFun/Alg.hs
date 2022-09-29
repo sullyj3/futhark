@@ -5,8 +5,8 @@ module Futhark.IR.Mem.IxFun.Alg
     iota,
     offsetIndex,
     permute,
-    rotate,
     reshape,
+    coerce,
     slice,
     flatSlice,
     rebase,
@@ -15,14 +15,11 @@ module Futhark.IR.Mem.IxFun.Alg
   )
 where
 
-import Futhark.IR.Pretty ()
 import Futhark.IR.Prop
 import Futhark.IR.Syntax
-  ( DimChange (..),
-    DimIndex (..),
+  ( DimIndex (..),
     FlatDimIndex (..),
     FlatSlice (..),
-    ShapeChange,
     Slice (..),
     flatSliceDims,
     sliceDims,
@@ -41,29 +38,32 @@ type Permutation = [Int]
 data IxFun num
   = Direct (Shape num)
   | Permute (IxFun num) Permutation
-  | Rotate (IxFun num) (Indices num)
   | Index (IxFun num) (Slice num)
   | FlatIndex (IxFun num) (FlatSlice num)
-  | Reshape (IxFun num) (ShapeChange num)
+  | Reshape (IxFun num) (Shape num)
+  | Coerce (IxFun num) (Shape num)
   | OffsetIndex (IxFun num) num
   | Rebase (IxFun num) (IxFun num)
   deriving (Eq, Show)
 
 instance Pretty num => Pretty (IxFun num) where
-  ppr (Direct dims) =
-    text "Direct" <> parens (commasep $ map ppr dims)
-  ppr (Permute fun perm) = ppr fun <> ppr perm
-  ppr (Rotate fun offsets) = ppr fun <> brackets (commasep $ map ((text "+" <>) . ppr) offsets)
-  ppr (Index fun is) = ppr fun <> ppr is
-  ppr (FlatIndex fun is) = ppr fun <> ppr is
-  ppr (Reshape fun oldshape) =
-    ppr fun
-      <> text "->reshape"
-      <> parens (commasep (map ppr oldshape))
-  ppr (OffsetIndex fun i) =
-    ppr fun <> text "->offset_index" <> parens (ppr i)
-  ppr (Rebase new_base fun) =
-    text "rebase(" <> ppr new_base <> text ", " <> ppr fun <> text ")"
+  pretty (Direct dims) =
+    "Direct" <> parens (commasep $ map pretty dims)
+  pretty (Permute fun perm) = pretty fun <> pretty perm
+  pretty (Index fun is) = pretty fun <> pretty is
+  pretty (FlatIndex fun is) = pretty fun <> pretty is
+  pretty (Reshape fun oldshape) =
+    pretty fun
+      <> "->reshape"
+      <> parens (pretty oldshape)
+  pretty (Coerce fun oldshape) =
+    pretty fun
+      <> "->coerce"
+      <> parens (pretty oldshape)
+  pretty (OffsetIndex fun i) =
+    pretty fun <> "->offset_index" <> parens (pretty i)
+  pretty (Rebase new_base fun) =
+    "rebase(" <> pretty new_base <> ", " <> pretty fun <> ")"
 
 iota :: Shape num -> IxFun num
 iota = Direct
@@ -74,9 +74,6 @@ offsetIndex = OffsetIndex
 permute :: IxFun num -> Permutation -> IxFun num
 permute = Permute
 
-rotate :: IxFun num -> Indices num -> IxFun num
-rotate = Rotate
-
 slice :: IxFun num -> Slice num -> IxFun num
 slice = Index
 
@@ -86,8 +83,11 @@ flatSlice = FlatIndex
 rebase :: IxFun num -> IxFun num -> IxFun num
 rebase = Rebase
 
-reshape :: IxFun num -> ShapeChange num -> IxFun num
+reshape :: IxFun num -> Shape num -> IxFun num
 reshape = Reshape
+
+coerce :: IxFun num -> Shape num -> IxFun num
+coerce = Reshape
 
 shape ::
   IntegralExp num =>
@@ -97,14 +97,14 @@ shape (Direct dims) =
   dims
 shape (Permute ixfun perm) =
   rearrangeShape perm $ shape ixfun
-shape (Rotate ixfun _) =
-  shape ixfun
 shape (Index _ how) =
   sliceDims how
 shape (FlatIndex ixfun how) =
   flatSliceDims how <> tail (shape ixfun)
 shape (Reshape _ dims) =
-  map newDim dims
+  dims
+shape (Coerce _ dims) =
+  dims
 shape (OffsetIndex ixfun _) =
   shape ixfun
 shape (Rebase _ ixfun) =
@@ -123,10 +123,6 @@ index (Permute fun perm) is_new =
   index fun is_old
   where
     is_old = rearrangeShape (rearrangeInverse perm) is_new
-index (Rotate fun offsets) is =
-  index fun $ zipWith mod (zipWith (+) is offsets) dims
-  where
-    dims = shape fun
 index (Index fun (Slice js)) is =
   index fun (adjust js is)
   where
@@ -138,8 +134,10 @@ index (FlatIndex fun (FlatSlice offset js)) is =
   where
     f i (FlatDimIndex _ s) = i * s
 index (Reshape fun newshape) is =
-  let new_indices = reshapeIndex (shape fun) (newDims newshape) is
+  let new_indices = reshapeIndex (shape fun) newshape is
    in index fun new_indices
+index (Coerce fun _) is =
+  index fun is
 index (OffsetIndex fun i) is =
   case shape fun of
     d : ds ->
@@ -150,17 +148,17 @@ index (Rebase new_base fun) is =
         Direct old_shape ->
           if old_shape == shape new_base
             then new_base
-            else reshape new_base $ map DimCoercion old_shape
+            else reshape new_base old_shape
         Permute ixfun perm ->
           permute (rebase new_base ixfun) perm
-        Rotate ixfun offsets ->
-          rotate (rebase new_base ixfun) offsets
         Index ixfun iis ->
           slice (rebase new_base ixfun) iis
         FlatIndex ixfun iis ->
           flatSlice (rebase new_base ixfun) iis
         Reshape ixfun new_shape ->
           reshape (rebase new_base ixfun) new_shape
+        Coerce ixfun new_shape ->
+          coerce (rebase new_base ixfun) new_shape
         OffsetIndex ixfun s ->
           offsetIndex (rebase new_base ixfun) s
         r@Rebase {} ->

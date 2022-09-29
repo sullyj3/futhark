@@ -1,30 +1,28 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
 -- | Futhark Compiler Driver
 module Futhark.CLI.Dev (main) where
 
 import Control.Category (id)
 import Control.Monad
 import Control.Monad.State
+import Data.Kind qualified
 import Data.List (intersperse)
 import Data.Maybe
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
+import Data.Text qualified as T
+import Data.Text.IO qualified as T
 import Futhark.Actions
-import qualified Futhark.Analysis.Alias as Alias
+import Futhark.Analysis.Alias qualified as Alias
 import Futhark.Analysis.Metrics (OpMetrics)
 import Futhark.Compiler.CLI hiding (compilerMain)
-import Futhark.IR (ASTRep, Op, Prog, pretty)
-import qualified Futhark.IR.GPU as GPU
-import qualified Futhark.IR.GPUMem as GPUMem
-import qualified Futhark.IR.MC as MC
-import qualified Futhark.IR.MCMem as MCMem
+import Futhark.IR (ASTRep, Op, Prog, prettyString)
+import Futhark.IR.GPU qualified as GPU
+import Futhark.IR.GPUMem qualified as GPUMem
+import Futhark.IR.MC qualified as MC
+import Futhark.IR.MCMem qualified as MCMem
 import Futhark.IR.Parse
 import Futhark.IR.Prop.Aliases (CanBeAliased)
-import qualified Futhark.IR.SOACS as SOACS
-import qualified Futhark.IR.Seq as Seq
-import qualified Futhark.IR.SeqMem as SeqMem
+import Futhark.IR.SOACS qualified as SOACS
+import Futhark.IR.Seq qualified as Seq
+import Futhark.IR.SeqMem qualified as SeqMem
 import Futhark.IR.TypeCheck (Checkable, checkProg)
 import Futhark.Internalise.Defunctionalise as Defunctionalise
 import Futhark.Internalise.Defunctorise as Defunctorise
@@ -36,7 +34,7 @@ import Futhark.Optimise.Fusion
 import Futhark.Optimise.HistAccs
 import Futhark.Optimise.InPlaceLowering
 import Futhark.Optimise.InliningDeadFun
-import qualified Futhark.Optimise.MemoryBlockMerging as MemoryBlockMerging
+import Futhark.Optimise.MemoryBlockMerging qualified as MemoryBlockMerging
 import Futhark.Optimise.ReduceDeviceSyncs (reduceDeviceSyncs)
 import Futhark.Optimise.Sink
 import Futhark.Optimise.TileLoops
@@ -44,8 +42,8 @@ import Futhark.Optimise.Unstream
 import Futhark.Pass
 import Futhark.Pass.AD
 import Futhark.Pass.ExpandAllocations
-import qualified Futhark.Pass.ExplicitAllocations.GPU as GPU
-import qualified Futhark.Pass.ExplicitAllocations.Seq as Seq
+import Futhark.Pass.ExplicitAllocations.GPU qualified as GPU
+import Futhark.Pass.ExplicitAllocations.Seq qualified as Seq
 import Futhark.Pass.ExtractKernels
 import Futhark.Pass.ExtractMulticore
 import Futhark.Pass.FirstOrderTransform
@@ -54,7 +52,7 @@ import Futhark.Pass.Simplify
 import Futhark.Passes
 import Futhark.Util.Log
 import Futhark.Util.Options
-import qualified Futhark.Util.Pretty as PP
+import Futhark.Util.Pretty qualified as PP
 import Language.Futhark.Core (locStr, nameFromString)
 import Language.Futhark.Parser (SyntaxError (..), parseFuthark)
 import System.Exit
@@ -127,13 +125,13 @@ instance Representation UntypedPassState where
   representation (SeqMem _) = "SeqMem"
 
 instance PP.Pretty UntypedPassState where
-  ppr (SOACS prog) = PP.ppr prog
-  ppr (GPU prog) = PP.ppr prog
-  ppr (MC prog) = PP.ppr prog
-  ppr (Seq prog) = PP.ppr prog
-  ppr (SeqMem prog) = PP.ppr prog
-  ppr (MCMem prog) = PP.ppr prog
-  ppr (GPUMem prog) = PP.ppr prog
+  pretty (SOACS prog) = PP.pretty prog
+  pretty (GPU prog) = PP.pretty prog
+  pretty (MC prog) = PP.pretty prog
+  pretty (Seq prog) = PP.pretty prog
+  pretty (SeqMem prog) = PP.pretty prog
+  pretty (MCMem prog) = PP.pretty prog
+  pretty (GPUMem prog) = PP.pretty prog
 
 newtype UntypedPass
   = UntypedPass
@@ -151,7 +149,7 @@ data UntypedAction
   | MCMemAction (BackendAction MCMem.MCMem)
   | SeqMemAction (BackendAction SeqMem.SeqMem)
   | PolyAction
-      ( forall rep.
+      ( forall (rep :: Data.Kind.Type).
         ( ASTRep rep,
           (CanBeAliased (Op rep)),
           (OpMetrics (Op rep))
@@ -400,12 +398,12 @@ commandLineOptions =
       "Disable type-checking.",
     Option
       []
-      ["pretty-print"]
+      ["prettyString-print"]
       ( NoArg $
           Right $ \opts ->
             opts {futharkPipeline = PrettyPrint}
       )
-      "Parse and pretty-print the AST of the given program.",
+      "Parse and prettyString-print the AST of the given program.",
     Option
       []
       ["backend"]
@@ -430,28 +428,28 @@ commandLineOptions =
       "Run this compiler backend on pipeline result.",
     Option
       []
-      ["compile-imperative"]
+      ["compile-imp-seq"]
       ( NoArg $
           Right $ \opts ->
             opts {futharkAction = SeqMemAction $ \_ _ _ -> impCodeGenAction}
       )
-      "Translate program into the imperative IL and write it on standard output.",
+      "Translate pipeline result to ImpSequential and write it on stdout.",
     Option
       []
-      ["compile-imperative-kernels"]
+      ["compile-imp-gpu"]
       ( NoArg $
           Right $ \opts ->
             opts {futharkAction = GPUMemAction $ \_ _ _ -> kernelImpCodeGenAction}
       )
-      "Translate program into the imperative IL with kernels and write it on standard output.",
+      "Translate pipeline result to ImpGPU and write it on stdout.",
     Option
       []
-      ["compile-imperative-multicore"]
+      ["compile-imp-multicore"]
       ( NoArg $
           Right $ \opts ->
             opts {futharkAction = MCMemAction $ \_ _ _ -> multicoreImpCodeGenAction}
       )
-      "Translate program into the imperative IL with kernels and write it on standard output.",
+      "Translate pipeline result to ImpMC write it on stdout.",
     Option
       "p"
       ["print"]
@@ -656,7 +654,7 @@ main = mainWithOptions newConfig commandLineOptions "options... program" compile
           p =
             mapM_ putStrLn
               . intersperse ""
-              . map (if futharkPrintAST config then show else pretty)
+              . map (if futharkPrintAST config then show else prettyString)
 
           readProgram' = readProgramFile (futharkEntryPoints (futharkConfig config)) file
 
@@ -665,10 +663,10 @@ main = mainWithOptions newConfig commandLineOptions "options... program" compile
           maybe_prog <- parseFuthark file <$> T.readFile file
           case maybe_prog of
             Left (SyntaxError loc err) ->
-              fail $ "Syntax error at " <> locStr loc <> ":\n" <> err
+              fail $ "Syntax error at " <> locStr loc <> ":\n" <> T.unpack err
             Right prog
               | futharkPrintAST config -> print prog
-              | otherwise -> putStrLn $ pretty prog
+              | otherwise -> putStrLn $ prettyString prog
         TypeCheck -> do
           (_, imports, _) <- readProgram'
           liftIO $
@@ -676,7 +674,7 @@ main = mainWithOptions newConfig commandLineOptions "options... program" compile
               putStrLn $
                 if futharkPrintAST config
                   then show $ fileProg fm
-                  else pretty $ fileProg fm
+                  else prettyString $ fileProg fm
         Defunctorise -> do
           (_, imports, src) <- readProgram'
           liftIO $ p $ evalState (Defunctorise.transformProg imports) src

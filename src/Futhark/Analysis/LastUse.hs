@@ -1,35 +1,38 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- | Provides last-use analysis for Futhark programs.
-module Futhark.Analysis.LastUse (LastUseMap, Used, analyseGPUMem, analyseSeqMem) where
+module Futhark.Analysis.LastUse
+  ( LastUseMap,
+    LastUse,
+    Used,
+    analyseGPUMem,
+    analyseSeqMem,
+  )
+where
 
 import Control.Monad.Reader
-import Data.Bifunctor (first)
+import Data.Bifunctor (bimap, first)
 import Data.Foldable
 import Data.Function ((&))
 import Data.Map (Map)
-import qualified Data.Map as M
+import Data.Map qualified as M
 import Data.Tuple
 import Futhark.Analysis.Alias (aliasAnalysis)
 import Futhark.IR.Aliases
 import Futhark.IR.GPUMem
 import Futhark.IR.SeqMem
 
--- | `LastUseMap` tells which names were last used in a given statement.
--- Statements are uniquely identified by the `VName` of the first value
--- parameter in the statement pattern. `Names` is the set of names last used.
+-- | 'LastUseMap' tells which names were last used in a given statement.
+-- Statements are uniquely identified by the 'VName' of the first value
+-- parameter in the statement pattern. 'Names' is the set of names last used.
 type LastUseMap = Map VName Names
 
--- | `LastUse` is a mapping from a `VName` to the statement identifying it's
--- last use. `LastUseMap` is the inverse of `LastUse`.
+-- | 'LastUse' is a mapping from a 'VName' to the statement identifying it's
+-- last use. 'LastUseMap' is the inverse of 'LastUse'.
 type LastUse = Map VName VName
 
--- | `Used` is the set of `VName` that were used somewhere in a statement, body
--- or otherwise.
+-- | 'Used' is the set of 'VName' that were used somewhere in a
+-- statement, body or otherwise.
 type Used = Names
 
 type LastUseOp rep =
@@ -141,12 +144,17 @@ analyseStm (lumap0, used0) (Let pat _ e) = do
     analyseExp (lumap, used) (Apply _ args _ _) = do
       let nms = freeIn $ map fst args
       pure (insertNames pat_name nms lumap, used <> nms)
-    analyseExp (lumap, used) (If cse then_body else_body dec) = do
-      (lumap_then, used_then) <- analyseBody lumap used then_body
-      (lumap_else, used_else) <- analyseBody lumap used else_body
-      let used' = used_then <> used_else
-          nms = (freeIn cse <> freeIn dec) `namesSubtract` used'
-      pure (insertNames pat_name nms (lumap_then <> lumap_else), used' <> nms)
+    analyseExp (lumap, used) (Match ses cases defbody dec) = do
+      (lumap_cases, used_cases) <-
+        bimap mconcat mconcat . unzip
+          <$> mapM (analyseBody lumap used . caseBody) cases
+      (lumap_defbody, used_defbody) <- analyseBody lumap used defbody
+      let used' = used_cases <> used_defbody
+          nms = (freeIn ses <> freeIn dec) `namesSubtract` used'
+      pure
+        ( insertNames pat_name nms (lumap_cases <> lumap_defbody),
+          used' <> nms
+        )
     analyseExp (lumap, used) (DoLoop merge form body) = do
       (lumap', used') <- analyseBody lumap used body
       let nms = (freeIn merge <> freeIn form) `namesSubtract` used'
