@@ -13,8 +13,9 @@ import Futhark.CodeGen.ImpCode
 -- | Set all uses of 'DefaultSpace' in the given definitions to another
 -- memory space.
 setDefaultSpace :: Space -> Definitions op -> Definitions op
-setDefaultSpace space (Definitions (Constants ps consts) (Functions fundecs)) =
+setDefaultSpace space (Definitions types (Constants ps consts) (Functions fundecs)) =
   Definitions
+    types
     (Constants (map (setParamSpace space) ps) (setCodeSpace space consts))
     ( Functions
         [ (fname, setFunctionSpace space func)
@@ -38,7 +39,7 @@ setEntrySpace :: Space -> EntryPoint -> EntryPoint
 setEntrySpace space (EntryPoint name results args) =
   EntryPoint
     name
-    (map (setExtValueSpace space) results)
+    (map (fmap $ setExtValueSpace space) results)
     (map (fmap $ setExtValueSpace space) args)
 
 setParamSpace :: Space -> Param -> Param
@@ -48,10 +49,10 @@ setParamSpace _ param =
   param
 
 setExtValueSpace :: Space -> ExternalValue -> ExternalValue
-setExtValueSpace space (OpaqueValue u desc vs) =
-  OpaqueValue u desc $ map (setValueSpace space) vs
-setExtValueSpace space (TransparentValue u v) =
-  TransparentValue u $ setValueSpace space v
+setExtValueSpace space (OpaqueValue desc vs) =
+  OpaqueValue desc $ map (setValueSpace space) vs
+setExtValueSpace space (TransparentValue v) =
+  TransparentValue $ setValueSpace space v
 
 setValueSpace :: Space -> ValueDesc -> ValueDesc
 setValueSpace space (ArrayValue mem _ bt ept shape) =

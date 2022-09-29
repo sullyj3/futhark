@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 * Using `==` to compare arrays is now deprecated.
 
+* New command: `futhark tokens`.  You probably don't care about this one.
+
+* In the C API, opaque types that correspond to tuples or records can
+  now have their elements inspected and be created from elements
+  (#1568).
+
 ### Removed
 
 ### Changed

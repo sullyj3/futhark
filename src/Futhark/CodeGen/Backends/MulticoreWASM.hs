@@ -52,7 +52,7 @@ compileProg version prog = do
       MC.operations
       MC.generateContext
       ""
-      [DefaultSpace]
+      (DefaultSpace, [DefaultSpace])
       MC.cliOptions
       prog'
 
@@ -73,6 +73,6 @@ fRepMyRep prog =
           JSEntryPoint
             { name = nameToString n,
               parameters = map (extToString . snd) args,
-              ret = map extToString res
+              ret = map (extToString . snd) res
             }
    in mapMaybe (function . snd) fs

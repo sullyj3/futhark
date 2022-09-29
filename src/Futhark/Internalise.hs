@@ -49,6 +49,7 @@ import Futhark.IR.SOACS as I hiding (stmPat)
 import Futhark.Internalise.Automap as Automap
 import Futhark.Internalise.Defunctionalise as Defunctionalise
 import Futhark.Internalise.Defunctorise as Defunctorise
+import Futhark.Internalise.Entry (visibleTypes)
 import qualified Futhark.Internalise.Exps as Exps
 import Futhark.Internalise.LiftLambdas as LiftLambdas
 import Futhark.Internalise.Monad as I
@@ -81,7 +82,7 @@ internaliseProg config prog = do
   prog_decs''' <- Defunctionalise.transformProg prog_decs''
   maybeLog "Converting to core IR"
   traceM $ "prog_decs''':" <> pretty prog_decs'''
-  Exps.transformProg (futharkSafe config) prog_decs'''
+  Exps.transformProg (futharkSafe config) (visibleTypes prog) prog_decs'''
   where
     verbose = fst (futharkVerbose config) > NotVerbose
     maybeLog s

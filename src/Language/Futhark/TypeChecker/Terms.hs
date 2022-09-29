@@ -395,7 +395,6 @@ checkExp (AppExp (BinOp (op, oploc) NoInfo (e1, _) (e2, _) loc) NoInfo) = do
           loc
       )
       (Info (AppRes res' retext))
-      
 checkExp exp'@(Project k e NoInfo loc) = do
   traceM $ "exp': " <> pretty exp'
   e' <- checkExp e
@@ -994,7 +993,7 @@ checkApply
       modify $ \s -> s {stateNames = M.insert v (NameAppRes fname loc) $ stateNames s}
       let appres = S.singleton $ AliasFree v
       let tp2'' = applySubst parsubst $ returnType appres tp2' (diet tp1') argtype'
-      --pure (tp1', tp2'', argext, ext)
+      -- pure (tp1', tp2'', argext, ext)
       pure (toStruct $ argtype', tp2'', argext, ext)
 checkApply loc fname tfun@(Scalar TypeVar {}) arg am = do
   tv <- newTypeVar loc "b"
@@ -1328,7 +1327,7 @@ localChecks = void . check
       e <$ case ty of
         Info (Scalar (Prim t)) -> errorBounds (inBoundsI (-x) t) (-x) t (loc1 <> loc2)
         _ -> error "Inferred type of int literal is not a number"
-    check e@(AppExp (BinOp (QualName [] v, _) _ (_, Info (Array {}, _)) _ loc) _)
+    check e@(AppExp (BinOp (QualName [] v, _) _ (_, Info (Array {}, _, _)) _ loc) _)
       | baseName v == "==",
         baseTag v <= maxIntrinsicTag = do
           warn loc $
