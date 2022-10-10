@@ -370,12 +370,31 @@ internaliseAppExp desc _ e@(E.Apply _ _ (Info (_, _, automap)) _) =
 
       -- Some functions are magical (overloaded) and we handle that here.
       case () of
-        -- Overloaded functions never take array arguments (except
-        -- equality, but those cannot be existential), so we can safely
-        -- ignore the existential dimensions.
         ()
-          | Just internalise <- isOverloadedFunction qfname (map fst args) loc,
-            automap == mempty ->
+          -- Short-circuiting operators are magical.
+          | baseTag (qualLeaf qfname) <= maxIntrinsicTag,
+            baseString (qualLeaf qfname) == "&&",
+            [(x, _), (y, _)] <- args ->
+              internaliseExp desc $
+                E.AppExp
+                  (E.If x y (E.Literal (E.BoolValue False) mempty) mempty)
+                  (Info $ AppRes (E.Scalar $ E.Prim E.Bool) [])
+          | baseTag (qualLeaf qfname) <= maxIntrinsicTag,
+            baseString (qualLeaf qfname) == "||",
+            [(x, _), (y, _)] <- args ->
+              internaliseExp desc $
+                E.AppExp
+                  (E.If x (E.Literal (E.BoolValue True) mempty) y mempty)
+                  (Info $ AppRes (E.Scalar $ E.Prim E.Bool) [])
+          -- Overloaded and intrinsic functions never take array
+          -- arguments (except equality, but those cannot be
+          -- existential), so we can safely ignore the existential
+          -- dimensions.
+          | Just internalise <- isOverloadedFunction qfname desc loc -> do
+              let prepareArg (arg, _) =
+                    (E.toStruct (E.typeOf arg),) <$> internaliseExp "arg" arg
+              internalise =<< mapM prepareArg args
+          | Just internalise <- isIntrinsicFunction qfname (map fst args) loc ->
               internalise desc
           | baseTag (qualLeaf qfname) <= maxIntrinsicTag,
             Just (rettype, _) <- M.lookup fname I.builtInFunctions -> do
@@ -1298,6 +1317,10 @@ internaliseBinOp ::
   E.PrimType ->
   E.PrimType ->
   InternaliseM [I.SubExp]
+internaliseBinOp _ desc E.LogAnd x y E.Bool _ =
+  simpleBinOp desc I.LogAnd x y
+internaliseBinOp _ desc E.LogOr x y E.Bool _ =
+  simpleBinOp desc I.LogOr x y
 internaliseBinOp _ desc E.Plus x y (E.Signed t) _ =
   simpleBinOp desc (I.Add t I.OverflowWrap) x y
 internaliseBinOp _ desc E.Plus x y (E.Unsigned t) _ =
@@ -1483,18 +1506,37 @@ internaliseLambdaCoerce lam argtypes = do
       rettype
       =<< bodyBind body
 
--- | Some operators and functions are overloaded or otherwise special
--- - we detect and treat them here.
+-- | Overloaded operators are treated here.
 isOverloadedFunction ::
+  E.QualName VName ->
+  String ->
+  SrcLoc ->
+  Maybe ([(E.StructType, [SubExp])] -> InternaliseM [SubExp])
+isOverloadedFunction qname desc loc = do
+  guard $ baseTag (qualLeaf qname) <= maxIntrinsicTag
+  handle $ baseString $ qualLeaf qname
+  where
+    handle name
+      | Just bop <- find ((name ==) . prettyString) [minBound .. maxBound :: E.BinOp] =
+          Just $ \[(x_t, [x']), (y_t, [y'])] ->
+            case (x_t, y_t) of
+              (E.Scalar (E.Prim t1), E.Scalar (E.Prim t2)) ->
+                internaliseBinOp loc desc bop x' y' t1 t2
+              _ -> error "Futhark.Internalise.internaliseExp: non-primitive type in BinOp."
+    handle _ = Nothing
+
+-- | Handle intrinsic functions.  These are only allowed to be called
+-- in the prelude, and their internalisation may involve inspecting
+-- the AST.
+isIntrinsicFunction ::
   E.QualName VName ->
   [E.Exp] ->
   SrcLoc ->
   Maybe (String -> InternaliseM [SubExp])
-isOverloadedFunction qname args loc = do
+isIntrinsicFunction qname args loc = do
   guard $ baseTag (qualLeaf qname) <= maxIntrinsicTag
   let handlers =
         [ handleSign,
-          handleIntrinsicOps,
           handleOps,
           handleSOACs,
           handleAccs,
@@ -1513,11 +1555,11 @@ isOverloadedFunction qname args loc = do
     handleSign [x] "unsign_i64" = Just $ toUnsigned I.Int64 x
     handleSign _ _ = Nothing
 
-    handleIntrinsicOps [x] s
+    handleOps [x] s
       | Just unop <- find ((== s) . prettyString) allUnOps = Just $ \desc -> do
           x' <- internaliseExp1 "x" x
           fmap pure $ letSubExp desc $ I.BasicOp $ I.UnOp unop x'
-    handleIntrinsicOps [TupLit [x, y] _] s
+    handleOps [TupLit [x, y] _] s
       | Just bop <- find ((== s) . prettyString) allBinOps = Just $ \desc -> do
           x' <- internaliseExp1 "x" x
           y' <- internaliseExp1 "y" y
@@ -1526,85 +1568,10 @@ isOverloadedFunction qname args loc = do
           x' <- internaliseExp1 "x" x
           y' <- internaliseExp1 "y" y
           fmap pure $ letSubExp desc $ I.BasicOp $ I.CmpOp cmp x' y'
-    handleIntrinsicOps [x] s
+    handleOps [x] s
       | Just conv <- find ((== s) . prettyString) allConvOps = Just $ \desc -> do
           x' <- internaliseExp1 "x" x
           fmap pure $ letSubExp desc $ I.BasicOp $ I.ConvOp conv x'
-    handleIntrinsicOps _ _ = Nothing
-
-    -- Short-circuiting operators are magical.
-    handleOps [x, y] "&&" = Just $ \desc ->
-      internaliseExp desc $
-        E.AppExp
-          (E.If x y (E.Literal (E.BoolValue False) mempty) mempty)
-          (Info $ AppRes (E.Scalar $ E.Prim E.Bool) [])
-    handleOps [x, y] "||" = Just $ \desc ->
-      internaliseExp desc $
-        E.AppExp
-          (E.If x (E.Literal (E.BoolValue True) mempty) y mempty)
-          (Info $ AppRes (E.Scalar $ E.Prim E.Bool) [])
-    -- Handle equality and inequality specially, to treat the case of
-    -- arrays.
-    handleOps [xe, ye] op
-      | Just cmp_f <- isEqlOp op = Just $ \desc -> do
-          xe' <- internaliseExp "x" xe
-          ye' <- internaliseExp "y" ye
-          rs <- zipWithM (doComparison desc) xe' ye'
-          cmp_f desc =<< letSubExp "eq" =<< eAll rs
-      where
-        isEqlOp "!=" = Just $ \desc eq ->
-          letTupExp' desc $ I.BasicOp $ I.UnOp I.Not eq
-        isEqlOp "==" = Just $ \_ eq ->
-          pure [eq]
-        isEqlOp _ = Nothing
-
-        doComparison desc x y = do
-          x_t <- I.subExpType x
-          y_t <- I.subExpType y
-          case x_t of
-            I.Prim t -> letSubExp desc $ I.BasicOp $ I.CmpOp (I.CmpEq t) x y
-            _ -> do
-              let x_dims = I.arrayDims x_t
-                  y_dims = I.arrayDims y_t
-              dims_match <- forM (zip x_dims y_dims) $ \(x_dim, y_dim) ->
-                letSubExp "dim_eq" $ I.BasicOp $ I.CmpOp (I.CmpEq int64) x_dim y_dim
-              shapes_match <- letSubExp "shapes_match" =<< eAll dims_match
-              let compare_elems_body = runBodyBuilder $ do
-                    -- Flatten both x and y.
-                    x_num_elems <-
-                      letSubExp "x_num_elems"
-                        =<< foldBinOp (I.Mul Int64 I.OverflowUndef) (constant (1 :: Int64)) x_dims
-                    x' <- letExp "x" $ I.BasicOp $ I.SubExp x
-                    y' <- letExp "x" $ I.BasicOp $ I.SubExp y
-                    x_flat <-
-                      letExp "x_flat" $ I.BasicOp $ I.Reshape I.ReshapeArbitrary (I.Shape [x_num_elems]) x'
-                    y_flat <-
-                      letExp "y_flat" $ I.BasicOp $ I.Reshape I.ReshapeArbitrary (I.Shape [x_num_elems]) y'
-
-                    -- Compare the elements.
-                    cmp_lam <- cmpOpLambda $ I.CmpEq (elemType x_t)
-                    cmps <-
-                      letExp "cmps" $
-                        I.Op $
-                          I.Screma x_num_elems [x_flat, y_flat] (I.mapSOAC cmp_lam)
-
-                    -- Check that all were equal.
-                    and_lam <- binOpLambda I.LogAnd I.Bool
-                    reduce <- I.reduceSOAC [Reduce Commutative and_lam [constant True]]
-                    all_equal <- letSubExp "all_equal" $ I.Op $ I.Screma x_num_elems [cmps] reduce
-                    pure $ resultBody [all_equal]
-
-              letSubExp "arrays_equal"
-                =<< eIf (eSubExp shapes_match) compare_elems_body (resultBodyM [constant False])
-    handleOps [x, y] name
-      | Just bop <- find ((name ==) . prettyString) [minBound .. maxBound :: E.BinOp] =
-          Just $ \desc -> do
-            x' <- internaliseExp1 "x" x
-            y' <- internaliseExp1 "y" y
-            case (E.typeOf x, E.typeOf y) of
-              (E.Scalar (E.Prim t1), E.Scalar (E.Prim t2)) ->
-                internaliseBinOp loc desc bop x' y' t1 t2
-              _ -> error "Futhark.Internalise.internaliseExp: non-primitive type in BinOp."
     handleOps _ _ = Nothing
 
     handleSOACs [TupLit [lam, arr] _] "map" = Just $ \desc -> do
